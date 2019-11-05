@@ -11,7 +11,7 @@ import re
 __all__ = ['WSB_USER_CONFIG', 'WSB_DIR', 'WSB_LOCAL_CONFIG', 'config']
 
 __package_name__ = 'webscrapbook'
-__version__ = '0.9.1'
+__version__ = '0.10.0'
 __author__ = 'Danny Lin'
 __author_email__ = 'danny0838@gmail.com'
 __homepage__ = 'https://github.com/danny0838/PyWebScrapBook'
@@ -47,6 +47,24 @@ class Config():
     def subsections(self):
         if self._conf is None: self.load()  # lazy load
         return self._subsections
+
+
+    def get(self, name):
+        if self._conf is None: self.load()  # lazy load
+        parts = name.split('.')
+        if len(parts) == 3:
+            sec, subsec, key = parts
+            try:
+                return self.subsections[sec][subsec][key]
+            except KeyError:
+                pass
+        elif len(parts) == 2:
+            sec, key = parts
+            try:
+                return self._conf[sec][key]
+            except KeyError:
+                pass
+        return None
 
 
     def dump(self, fh):

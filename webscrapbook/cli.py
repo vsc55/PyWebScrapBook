@@ -16,10 +16,6 @@ from . import server
 from . import util
 
 
-class WebScrapBookInitError(Exception):
-    pass
-
-
 def time_ns():
     """Get current time int with nanoseconds precision.
     """
@@ -60,7 +56,7 @@ def cmd_serve(args):
 
 
 def cmd_config(args):
-    """Show or edit config."""
+    """Show, generate, or edit config."""
     if args['book']:
         filename = WSB_LOCAL_CONFIG
         fdst = os.path.normpath(os.path.join(args['root'], WSB_DIR, filename))
@@ -70,12 +66,14 @@ def cmd_config(args):
             try:
                 fcopy(fsrc, fdst)
             except:
-                raise WebScrapBookInitError("Unable to generate {}.".format(fdst))
+                print("Error: Unable to generate {}.".format(fdst), file=sys.stderr)
+                sys.exit(1)
 
-        try:
-            util.launch(fdst)
-        except OSError:
-            pass
+        if args['edit']:
+            try:
+                util.launch(fdst)
+            except OSError:
+                pass
 
         if args['all']:
             filename = 'serve.py'
@@ -87,7 +85,8 @@ def cmd_config(args):
                     fcopy(fsrc, fdst)
                     os.chmod(fdst, os.stat(fdst).st_mode | (0o111 & ~get_umask()))
                 except:
-                    raise WebScrapBookInitError("Unable to generate {}.".format(fdst))
+                    print("Error: Unable to generate {}.".format(fdst), file=sys.stderr)
+                    sys.exit(1)
 
             filename = 'serve.wsgi'
             fdst = os.path.normpath(os.path.join(args['root'], WSB_DIR, filename))
@@ -98,9 +97,10 @@ def cmd_config(args):
                     fcopy(fsrc, fdst)
                     os.chmod(fdst, os.stat(fdst).st_mode | (0o111 & ~get_umask()))
                 except:
-                    raise WebScrapBookInitError("Unable to generate {}.".format(fdst))
+                    print("Error: Unable to generate {}.".format(fdst), file=sys.stderr)
+                    sys.exit(1)
 
-    if args['user']:
+    elif args['user']:
         fdst = WSB_USER_CONFIG
         fsrc = os.path.normpath(os.path.join(__file__, '..', 'resources', WSB_LOCAL_CONFIG))
         if not os.path.isfile(fdst):
@@ -108,14 +108,33 @@ def cmd_config(args):
             try:
                 fcopy(fsrc, fdst)
             except:
-                raise WebScrapBookInitError("Unable to generate {}.".format(fdst))
+                print("Error: Unable to generate {}.".format(fdst), file=sys.stderr)
+                sys.exit(1)
 
-        try:
-            util.launch(fdst)
-        except OSError:
-            pass
+        if args['edit']:
+            try:
+                util.launch(fdst)
+            except OSError:
+                pass
 
-    if not any(args[k] for k in ('book', 'user')):
+    elif args['edit']:
+        print("Error: Use --edit in combine with --book or --user.", file=sys.stderr)
+        sys.exit(1)
+
+    elif args['all']:
+        print("Error: Use --all in combine with --book.", file=sys.stderr)
+        sys.exit(1)
+
+    elif args['name']:
+        value = config.get(args['name'])
+
+        if value is None:
+            print("Error: Config entry '{}' does not exist".format(args['name']), file=sys.stderr)
+            sys.exit(1)
+
+        print(value)
+
+    else:
         config.dump(sys.stdout)
 
 
@@ -259,12 +278,16 @@ def main():
     parser_config = subparsers.add_parser('config', aliases=['c'],
         help=cmd_config.__doc__, description=cmd_config.__doc__)
     parser_config.set_defaults(func=cmd_config)
+    parser_config.add_argument('name', nargs='?',
+        help="""show value of the given config name. (in the form of <section>[.<subsection>].<key>)""")
     parser_config.add_argument('-b', '--book', default=False, action='store_true',
-        help="""generate and edit book config.""")
+        help="""generate book config file.""")
     parser_config.add_argument('-u', '--user', default=False, action='store_true',
-        help="""generate and edit user config.""")
+        help="""generate user config file.""")
     parser_config.add_argument('-a', '--all', default=False, action='store_true',
-        help="""generate more assistant files.""")
+        help="""generate more assistant files. (with --book)""")
+    parser_config.add_argument('-e', '--edit', default=False, action='store_true',
+        help="""edit the config file. (with --book or --user)""")
 
     # subcommand: encrypt
     parser_encrypt = subparsers.add_parser('encrypt', aliases=['e'],
