@@ -15,7 +15,7 @@ from urllib.parse import quote, unquote
 try:
     from secrets import token_urlsafe
 except ImportError:
-    from .lib.secrets import token_urlsafe
+    from .lib.shim.secrets import token_urlsafe
 
 
 #########################################################################
@@ -215,7 +215,7 @@ def zip_listdir(zip, subpath):
     Raise ZipDirNotFoundError if subpath does not exist. 
 
     NOTE: It is possible that entry mydir/ does not exist while
-    mydir/foo.bar exists. Check for matching subentries fo make sure whether
+    mydir/foo.bar exists. Check for matching subentries to make sure whether
     the directory exists.
     """
     if not isinstance(zip, zipfile.ZipFile):
