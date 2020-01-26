@@ -18,6 +18,7 @@ import hashlib
 import json
 from base64 import b64decode
 from urllib.parse import urlsplit, urlunsplit, urljoin, quote, unquote, parse_qs
+from pathlib import Path
 
 # dependency
 from .lib.patch import bottle
@@ -28,6 +29,7 @@ import commonmark
 
 # this package
 from . import *
+from . import __version__
 from . import util
 
 try:
@@ -58,7 +60,11 @@ def http_response(body='', status=None, headers=None, format=None, **more_header
 
     ref: https://jsonapi.org
     """
-    if format == 'json':
+    if not format:
+        pass
+
+    # expect body to be a JSON-serializable object
+    elif format == 'json':
         more_headers['Content-type'] = 'application/json'
 
         body = {
@@ -67,6 +73,22 @@ def http_response(body='', status=None, headers=None, format=None, **more_header
             }
 
         body = json.dumps(body, ensure_ascii=False)
+
+    # expect body to be a generator of text (mostly JSON) data
+    elif format == 'sse':
+        more_headers['Content-type'] = 'text/event-stream'
+
+        def wrapper(gen):
+            for data in gen:
+                yield "data: " + data + "\n\n"
+
+            yield "event: complete" + "\n"
+            yield "data: " + "\n\n"
+
+        body = wrapper(body)
+
+    else:
+        return http_error(400, 'Output format "{}" is not supported.'.format(format), format=format)
 
     return HTTPResponse(body, status, headers, **more_headers)
 
@@ -79,6 +101,7 @@ def http_error(
          format=None, **more_headers):
     """Handles formatted error response.
     """
+    # expect body to be a JSON-serializable object
     if format == 'json':
         more_headers['Content-type'] = 'application/json'
 
@@ -88,11 +111,11 @@ def http_error(
                 'message': body,
                 },
             }
+
         body = json.dumps(body, ensure_ascii=False)
         return HTTPResponse(body, status, **more_headers)
 
-    else:
-        return HTTPError(status, body, exception, traceback, **more_headers)
+    return HTTPError(status, body, exception, traceback, **more_headers)
 
 
 def get_base():
@@ -180,7 +203,7 @@ def handle_authorization(format=None):
         return http_error(401, "You are not authorized.", format=format, **headers)
 
 
-def handle_directory_listing(localpath, format=None):
+def handle_directory_listing(localpath, recursive=False, format=None):
     """List contents in a directory.
     """
     # ensure directory has trailing '/'
@@ -205,9 +228,23 @@ def handle_directory_listing(localpath, format=None):
     headers['Date'] = email.utils.formatdate(time.time(), usegmt=True)
 
     # output index
-    subentries = util.listdir(localpath)
+    subentries = util.listdir(localpath, recursive)
 
-    if format:
+    if format == 'sse':
+        def gen():
+            for entry in subentries:
+                data = {
+                    'name': entry.name,
+                    'type': entry.type,
+                    'size': entry.size,
+                    'last_modified': entry.last_modified,
+                    }
+
+                yield json.dumps(data, ensure_ascii=False)
+
+        return http_response(gen(), format=format, **headers)
+
+    elif format == 'json':
         data = []
         for entry in subentries:
             data.append({
@@ -227,7 +264,7 @@ def handle_directory_listing(localpath, format=None):
             subentries=subentries,
             )
 
-    return HTTPResponse(body, **headers)
+    return http_response(body, format=format, **headers)
 
 
 def handle_zip_directory_listing(zip, archivefile, subarchivepath, format=None):
@@ -527,8 +564,8 @@ def handle_request(filepath):
 
                 if format:
                     return http_response('Command run successfully.', format=format)
-                else:
-                    return http_response(status=204, format=format)
+
+                return http_response(status=204, format=format)
        
             return http_error(404, "File does not exist.", format=format)
 
@@ -546,7 +583,8 @@ def handle_request(filepath):
             return http_error(400, "Action not supported.", format=format)
 
         if os.path.isdir(localpath):
-            return handle_directory_listing(localtargetpath, format=format)
+            recursive = request.params.get('recursive', type=bool)
+            return handle_directory_listing(localtargetpath, recursive=recursive, format=format)
 
         return http_error(400, "This is not a directory.", format=format)
 
@@ -559,6 +597,7 @@ def handle_request(filepath):
         data['app']['is_local'] = is_local_access()
         data['app']['root'] = runtime['root']
         data['app']['base'] = get_base()
+        data['VERSION'] = __version__;
         data['WSB_DIR'] = WSB_DIR;
         data['WSB_LOCAL_CONFIG'] = WSB_LOCAL_CONFIG;
         return http_response(data, format=format)
@@ -676,18 +715,32 @@ def handle_request(filepath):
             check_delta = min(check_timeout, 0.1)
 
             while True:
-                if os.path.lexists(targetpath):
-                    t = time.time()
-                    if t >= os.stat(targetpath).st_mtime + check_stale:
-                        os.rmdir(targetpath)
-                    elif t >= check_expire:
-                        return http_error(500, 'Unable to acquire lock "{}".'.format(name), format=format)
-                    else:
-                        time.sleep(check_delta)
-                        continue
-
                 try:
                     os.makedirs(targetpath)
+                except FileExistsError:
+                    t = time.time()
+
+                    if t >= check_expire:
+                        return http_error(500, 'Unable to acquire lock "{}".'.format(name), format=format)
+
+                    try:
+                        lock_expire = os.stat(targetpath).st_mtime + check_stale
+                    except FileNotFoundError:
+                        # Lock removed by another process during the short interval.
+                        # Try acquire again.
+                        continue
+
+                    if t >= lock_expire:
+                        # Lock expired. Touch rather than remove and make for atomicity.
+                        try:
+                            Path(targetpath).touch()
+                        except:
+                            traceback.print_exc()
+                            return http_error(500, 'Unable to regenerate stale lock "{}".'.format(name), format=format)
+                        else:
+                            break
+
+                    time.sleep(check_delta)
                 except:
                     traceback.print_exc()
                     return http_error(500, 'Unable to create lock "{}".'.format(name), format=format)
@@ -946,8 +999,8 @@ def handle_request(filepath):
             new_url = urlunsplit(new_parts)
             return redirect(new_url)
 
-    # "view" or unknown actions
-    else:
+    # "view" or undefined actions
+    elif action == 'view':
         # show file information for other output formats
         if format:
             info = util.file_info(localpath)
@@ -994,6 +1047,10 @@ def handle_request(filepath):
 
         # probably 404 not found here
         return static_file(filepath, root=runtime['root'], mimetype=mimetype, charset=None)
+
+    # unknown action
+    else:
+        return http_error(400, "Action not supported.", format=format)
 
 
 def debug(*msg):
