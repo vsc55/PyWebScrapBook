@@ -1,6 +1,6 @@
 ## Basic
 
-WebsScrapBook has 3 levels of configuration:
+WebScrapBook has 3 levels of configuration:
 
 * default: written in the source code
 * user: at "~/.wsbconfig"
@@ -8,13 +8,18 @@ WebsScrapBook has 3 levels of configuration:
 
 with the latters overwriting the formers.
 
+Configs are loaded only at process starting, and a config change won't affect
+an already running process. For example, a running webscrapbook server needs 
+to be shut off and restarted to get new configs take effect.
+
 
 ## Configuration Format
 
-WebsScrapBook config files are written in "ini" format, which looks like:
+A WebScrapBook config file is written in "ini" format, which looks like:
 
     # A "#" or ";" at line beginning starts a comment, causing the whole
-    # line ignored when run. You can also use a comment to "disable" a setting.
+    # line ignored when run. A comment can also be used to temporarily
+    # disable a setting for testing or debugging purpose.
 
     # "[" and "]" define a section.
     [server]
@@ -23,11 +28,11 @@ WebsScrapBook config files are written in "ini" format, which looks like:
     # to "theme  =    default  "
     theme = default
 
-    # Use on/off, yes/no, true/false, or 1/0 for a boolean value.
+    # Use true/false, on/off, yes/no, or 1/0 for a boolean value.
     ssl_on = false
 
-    # A section may be subsected using syntax [section "subsection"]. For
-    # such cases [section] will also be mapped as [section ""].
+    # A section may be subsected using syntax [section "subsection"]. In such
+    # case [section] also means [section ""].
     [auth "user1"]
     user = myuser1
     #...
@@ -106,8 +111,8 @@ without leading or trailing slash.
 #### `data_dir`
 
 The directory where scrapbook data should be stored in. It's a directory path
-under top_dir, without leading or trailing slash. Use "data" if the scrapbook
-is migrated from legacy ScrapBook.
+under top_dir, without leading or trailing slash, and cannot be under tree_dir
+or .wsb. Use "data" if the scrapbook is migrated from legacy ScrapBook.
 
 (default: )
 
@@ -115,7 +120,7 @@ is migrated from legacy ScrapBook.
 #### `tree_dir`
 
 The directory where scrapbook index tree should be stored in. It's a directory
-path under top_dir, withou leading or trailing slash. Use "tree" if the
+path under top_dir, without leading or trailing slash. Use "tree" if the
 scrapbook is migrated from legacy ScrapBook.
 
 (default: .wsb/tree)
@@ -132,18 +137,17 @@ is migrated from legacy ScrapBook.
 
 #### `no_tree`
 
-Set true to disable virtual tree system of the book, and files are managed
-through the filesystem only.
+Set true to disable virtual tree and index of the book.
 
 (default: false)
 
 
 ### [auth] section(s)
 
-The [auth] section(s) define authenication rules. It can be subsected as
-[auth "identifier"]. Authenication requirement is turned on when at least one
+The [auth] section(s) define authorization rules. It can be subsected as
+[auth "identifier"]. Authorization requirement is activated when at least one
 [auth] section exists. Each section defines a rule, and the user must fullfill
-the rule of at least one section to be able to access.
+at least one to be allowed to access.
 
 An encrypted password can be generated via the "encrypt" sub-command, For
 example:
@@ -153,11 +157,12 @@ example:
 You'll then be promopted to input a password, and then you can use the output
 for pw, "mysalt" for pw_salt, and "sha1" for pw_type.
 
-NOTE: Use password authenication with HTTPS protocol as possible, since user
-input user name and password are not encrypted during tramsmission when using
-HTTP.
+To specify permission for an anonymous user, create an [auth] section with
+empty user and a password matching an empty string (e.g. "plain" pw_type, empty
+pw, and empty pw_salt.)
 
-(default: )
+NOTE: Use HTTPS protocol as possible when password authorization is activated,
+as input user name and password are unencrypted during HTTP transmission.
 
 
 #### `user`
@@ -191,8 +196,14 @@ sha224, sha256, sha384, sha512, sha3_224, sha3_256, sha3_384, and sha3_512.
 
 #### `permission`
 
-The permission for those who fullfills this condition. Use "all" for unlimited
-access. Use "read" for read-only access.
+The permission for those who fullfills this authorization condition.
+* "all": unrestricted access.
+* "read": read-only. APIs for data modification are disabled. Note that
+  essential server information is still exposed. Recommended for read-only
+  WebScrapBook browser extension access.
+* "view": web browsing only. Most APIs are disabled and access via
+  WebScrapBook browser extension is not allowed. Recommended for general public
+  access.
 
 (default: all)
 

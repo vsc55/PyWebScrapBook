@@ -11,7 +11,7 @@ import re
 __all__ = ['WSB_USER_CONFIG', 'WSB_DIR', 'WSB_LOCAL_CONFIG', 'config']
 
 __package_name__ = 'webscrapbook'
-__version__ = '0.12.0'
+__version__ = '0.13.1'
 __author__ = 'Danny Lin'
 __author_email__ = 'danny0838@gmail.com'
 __homepage__ = 'https://github.com/danny0838/PyWebScrapBook'
@@ -21,7 +21,13 @@ WSB_USER_CONFIG = os.path.join(os.path.expanduser('~'), '.wsbconfig')
 WSB_DIR = '.wsb'
 WSB_LOCAL_CONFIG = 'config.ini'
 
+mimetypes.add_type("application/rss+xml", ".rss")
+mimetypes.add_type("application/atom+xml", ".atom")
 mimetypes.add_type("text/markdown", ".md")
+mimetypes.add_type("text/markdown", ".mkd")
+mimetypes.add_type("text/markdown", ".mkdn")
+mimetypes.add_type("text/markdown", ".mdwn")
+mimetypes.add_type("text/markdown", ".mdown")
 mimetypes.add_type("text/markdown", ".markdown")
 mimetypes.add_type("application/html+zip", ".htz")
 mimetypes.add_type("application/x-maff", ".maff")
