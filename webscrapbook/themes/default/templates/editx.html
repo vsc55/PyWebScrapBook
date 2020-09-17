@@ -1,0 +1,25 @@
+{% extends "base.html" %}
+{% block title %}Edit {{ path }}{% endblock %}
+{% block links %}
+<link rel="stylesheet" type="text/css" href="{{ static_url('edit.css') }}">
+{%- endblock %}
+{% block scripts %}
+<script src="{{ static_url('common.js') }}"></script>
+<script src="{{ static_url('editx.js') }}"></script>
+{%- endblock %}
+{% block content %}
+<div id="pinned">
+<noscript>
+<div class="error">Enable JavaScript or upgrade your browser to support JavaScript, so that the HTML editor can work.</div>
+</noscript>
+</div>
+<div id="wrapper">
+<iframe id="editor" src="?a=view" sandbox="allow-same-origin"></iframe>
+<div id="toolbar">
+  <div>
+    <input id="btn-save" type="button" value="SAVE" autocomplete="off">
+    <input id="btn-exit" type="button" value="EXIT" autocomplete="off">
+  </div>
+</div>
+</div>
+{% endblock %}

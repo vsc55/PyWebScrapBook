@@ -5,21 +5,23 @@ import sys
 import os
 from configparser import ConfigParser
 from collections import OrderedDict
+from copy import deepcopy
 import mimetypes
 import re
 
-__all__ = ['WSB_USER_CONFIG', 'WSB_DIR', 'WSB_LOCAL_CONFIG', 'config']
+__all__ = ['WSB_EXTENSION_MIN_VERSION', 'WSB_USER_CONFIG', 'WSB_DIR', 'WSB_LOCAL_CONFIG', 'config']
 
 __package_name__ = 'webscrapbook'
-__version__ = '0.13.1'
+__version__ = '0.21.0'
 __author__ = 'Danny Lin'
 __author_email__ = 'danny0838@gmail.com'
 __homepage__ = 'https://github.com/danny0838/PyWebScrapBook'
 __license__ = 'MIT'
 
-WSB_USER_CONFIG = os.path.join(os.path.expanduser('~'), '.wsbconfig')
-WSB_DIR = '.wsb'
-WSB_LOCAL_CONFIG = 'config.ini'
+WSB_EXTENSION_MIN_VERSION = '0.76.0'
+WSB_USER_CONFIG = os.environ.get('WSB_USER_CONFIG') or os.path.join(os.path.expanduser('~'), '.wsbconfig')
+WSB_DIR = os.environ.get('WSB_DIR') or '.wsb'
+WSB_LOCAL_CONFIG = os.environ.get('WSB_LOCAL_CONFIG') or 'config.ini'
 
 mimetypes.add_type("application/rss+xml", ".rss")
 mimetypes.add_type("application/atom+xml", ".atom")
@@ -32,6 +34,9 @@ mimetypes.add_type("text/markdown", ".markdown")
 mimetypes.add_type("application/html+zip", ".htz")
 mimetypes.add_type("application/x-maff", ".maff")
 
+# seems to be set to x-zip-compressed on Windows
+mimetypes.add_type("application/zip", ".zip")
+
 
 class Config():
     """Config class whose values are lazily-initialized when accessed.
@@ -41,27 +46,26 @@ class Config():
     """
     def __init__(self):
         self._conf = None
-        self._subsections = OrderedDict()
+        self._data = None
 
 
     def __getitem__(self, key):
         if self._conf is None: self.load()  # lazy load
-        return self._conf[key]
+        return self._data[key]
 
 
-    @property
-    def subsections(self):
+    def __iter__(self):
         if self._conf is None: self.load()  # lazy load
-        return self._subsections
+        return iter(self._data)
 
 
-    def get(self, name):
+    def getname(self, name):
         if self._conf is None: self.load()  # lazy load
         parts = name.split('.')
         if len(parts) == 3:
             sec, subsec, key = parts
             try:
-                return self.subsections[sec][subsec][key]
+                return self._conf[f'{sec} "{subsec}"'][key]
             except KeyError:
                 pass
         elif len(parts) == 2:
@@ -82,30 +86,7 @@ class Config():
         """Dump configs as an object, with type casting.
         """
         if self._conf is None: self.load()  # lazy load
-
-        data = OrderedDict()
-        for section in self._conf.sections():
-            # remove [section "subsection"]
-            if re.search(r'\s*"[^"]*"\s*$', section):
-                continue
-
-            data[section] = OrderedDict(self._conf[section])
-
-        for sec, section in self.subsections.items():
-            for subsec, subsection in section.items():
-                data.setdefault(sec, OrderedDict())[subsec] = OrderedDict(subsection)
-
-        # type casting
-        data['server']['port'] = self._conf['server'].getint('port')
-        data['server']['threads'] = self._conf['server'].getint('threads')
-        data['server']['ssl_on'] = self._conf['server'].getboolean('ssl_on')
-        data['server']['browse'] = self._conf['server'].getboolean('browse')
-        data['browser']['cache_expire'] = self._conf['browser'].getint('cache_expire')
-        data['browser']['use_jar'] = self._conf['browser'].getboolean('use_jar')
-        for ss in data['book']:
-            data['book'][ss]['no_tree'] = self._conf['book "{}"'.format(ss)].getboolean('no_tree')
-
-        return data
+        return deepcopy(self._data)
 
 
     def load(self, root='.'):
@@ -122,6 +103,10 @@ class Config():
             try:
                 parser = ConfigParser(interpolation=None)
                 parser.read(file, encoding='UTF-8')
+            except Exception:
+                print(f'Error: Unable to load config from "{file}".', file=sys.stderr)
+                raise
+            else:
                 for section in parser.sections():
                     # Handle subsected sections formatted as [section "subsection"].
                     # Also normalize [section] and [section  ""  ] to [section ""].
@@ -129,7 +114,7 @@ class Config():
                     if m:
                         sec, subsec = m.group(1), m.group(2) or ''
                         if sec in self.SUBSECTED:
-                            newsection = '{} "{}"'.format(sec, subsec)
+                            newsection = f'{sec} "{subsec}"'
                             if newsection != section:
                                 conf.setdefault(newsection, OrderedDict())
                                 conf[newsection].update(parser[section])
@@ -140,9 +125,6 @@ class Config():
                     # Section object.
                     conf.setdefault(section, OrderedDict())
                     conf[section].update(parser[section])
-            except:
-                print('Error: Unable to load config from "{}".'.format(file), file=sys.stderr)
-                raise
 
         # default config
         self._conf = conf = ConfigParser(interpolation=None)
@@ -151,10 +133,15 @@ class Config():
         conf['app']['theme'] = 'default'
         conf['app']['root'] = '.'
         conf['app']['base'] = ''
+        conf['app']['content_security_policy'] = 'strict'
+        conf['app']['allowed_x_for'] = '0'
+        conf['app']['allowed_x_proto'] = '0'
+        conf['app']['allowed_x_host'] = '0'
+        conf['app']['allowed_x_port'] = '0'
+        conf['app']['allowed_x_prefix'] = '0'
         conf['server'] = {}
         conf['server']['port'] = '8080'
         conf['server']['host'] = 'localhost'
-        conf['server']['threads'] = '0'
         conf['server']['ssl_on'] = 'false'
         conf['server']['ssl_key'] = ''
         conf['server']['ssl_cert'] = ''
@@ -181,13 +168,50 @@ class Config():
         load_config(os.path.join(root, WSB_DIR, WSB_LOCAL_CONFIG))
 
         # map subsections
-        for section in conf:
+        self._data = OrderedDict()
+        for section in conf.sections():
+            sectionobj = OrderedDict()
             m = re.search(r'^(\S*)(?:\s*"([^"\]]*)"\s*)?$', section)
             if m:
                 sec, subsec = m.group(1), m.group(2) or ''
                 if sec in self.SUBSECTED:
-                    self._subsections.setdefault(sec, OrderedDict())[subsec] = conf[section]
+                    self._data.setdefault(sec, OrderedDict())[subsec] = sectionobj
+                    for key in conf[section]:
+                        try:
+                            sectionobj[key] = getattr(conf[section], self.TYPES[sec][None][key])(key)
+                        except KeyError:
+                            sectionobj[key] = conf[section][key]
+                    continue
+            self._data[section] = sectionobj
+            for key in conf[section]:
+                try:
+                    sectionobj[key] = getattr(conf[section], self.TYPES[section][key])(key)
+                except KeyError:
+                    sectionobj[key] = conf[section][key]
 
     SUBSECTED = ['book', 'auth']
+    TYPES = {
+        'app': {
+            'allowed_x_for': 'getint',
+            'allowed_x_proto': 'getint',
+            'allowed_x_host': 'getint',
+            'allowed_x_port': 'getint',
+            'allowed_x_prefix': 'getint',
+            },
+        'server': {
+            'port': 'getint',
+            'ssl_on': 'getboolean',
+            'browse': 'getboolean',
+            },
+        'browser': {
+            'cache_expire': 'getint',
+            'use_jar': 'getboolean',
+            },
+        'book': {
+            None: {
+                'no_tree': 'getboolean',
+                },
+            },
+        }
 
 config = Config()

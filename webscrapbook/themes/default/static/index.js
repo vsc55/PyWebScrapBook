@@ -438,9 +438,11 @@ function onCommandFocus(event) {
   switch (selectedEntries.length) {
     case 0: {
       cmdElem.querySelector('[value="source"]').hidden = true;
+      cmdElem.querySelector('[value="download"]').hidden = true;
       cmdElem.querySelector('[value="exec"]').hidden = true;
       cmdElem.querySelector('[value="browse"]').hidden = true;
       cmdElem.querySelector('[value="mkdir"]').hidden = false;
+      cmdElem.querySelector('[value="mkzip"]').hidden = false;
       cmdElem.querySelector('[value="edit"]').hidden = false;
       cmdElem.querySelector('[value="editx"]').hidden = true;
       cmdElem.querySelector('[value="upload"]').hidden = false;
@@ -458,9 +460,11 @@ function onCommandFocus(event) {
       const isHtml = /\.(?:x?html?|xht)$/i.test(elem.querySelector('a[href]').href);
       if (elem.classList.contains('link')) {
         cmdElem.querySelector('[value="source"]').hidden = false;
+        cmdElem.querySelector('[value="download"]').hidden = false;
         cmdElem.querySelector('[value="exec"]').hidden = false;
         cmdElem.querySelector('[value="browse"]').hidden = false;
         cmdElem.querySelector('[value="mkdir"]').hidden = true;
+        cmdElem.querySelector('[value="mkzip"]').hidden = true;
         cmdElem.querySelector('[value="edit"]').hidden = true;
         cmdElem.querySelector('[value="editx"]').hidden = true;
         cmdElem.querySelector('[value="upload"]').hidden = true;
@@ -470,9 +474,11 @@ function onCommandFocus(event) {
         cmdElem.querySelector('[value="delete"]').hidden = false;
       } else if (elem.classList.contains('file')) {
         cmdElem.querySelector('[value="source"]').hidden = false;
+        cmdElem.querySelector('[value="download"]').hidden = false;
         cmdElem.querySelector('[value="exec"]').hidden = false;
         cmdElem.querySelector('[value="browse"]').hidden = false;
         cmdElem.querySelector('[value="mkdir"]').hidden = true;
+        cmdElem.querySelector('[value="mkzip"]').hidden = true;
         cmdElem.querySelector('[value="edit"]').hidden = false;
         cmdElem.querySelector('[value="editx"]').hidden = !isHtml;
         cmdElem.querySelector('[value="upload"]').hidden = true;
@@ -484,9 +490,11 @@ function onCommandFocus(event) {
         cmdElem.querySelector('[value="edit"]').textContent = 'Edit';
       } else if (elem.classList.contains('dir')) {
         cmdElem.querySelector('[value="source"]').hidden = true;
+        cmdElem.querySelector('[value="download"]').hidden = true;
         cmdElem.querySelector('[value="exec"]').hidden = false;
         cmdElem.querySelector('[value="browse"]').hidden = false;
         cmdElem.querySelector('[value="mkdir"]').hidden = true;
+        cmdElem.querySelector('[value="mkzip"]').hidden = true;
         cmdElem.querySelector('[value="edit"]').hidden = true;
         cmdElem.querySelector('[value="editx"]').hidden = true;
         cmdElem.querySelector('[value="upload"]').hidden = true;
@@ -500,9 +508,11 @@ function onCommandFocus(event) {
 
     default: { // multiple
       cmdElem.querySelector('[value="source"]').hidden = true;
+      cmdElem.querySelector('[value="download"]').hidden = true;
       cmdElem.querySelector('[value="exec"]').hidden = true;
       cmdElem.querySelector('[value="browse"]').hidden = true;
       cmdElem.querySelector('[value="mkdir"]').hidden = true;
+      cmdElem.querySelector('[value="mkzip"]').hidden = true;
       cmdElem.querySelector('[value="edit"]').hidden = true;
       cmdElem.querySelector('[value="editx"]').hidden = true;
       cmdElem.querySelector('[value="upload"]').hidden = true;
@@ -547,6 +557,12 @@ async function onCommandRun(event) {
     case 'source': {
       const target = selectedEntries[0].querySelector('a[href]').href;
       location.href = target + '?a=source';
+      break;
+    }
+
+    case 'download': {
+      const target = selectedEntries[0].querySelector('a[href]').href;
+      location.href = target + '?a=download';
       break;
     }
 
@@ -597,6 +613,31 @@ async function onCommandRun(event) {
         });
       } catch (ex) {
         alert(`Unable to create directory "${newFolderName}": ${ex.message}`);
+        break;
+      }
+      location.reload();
+      break;
+    }
+
+    case 'mkzip': {
+      const newFileName = prompt('Input a name:', 'new-archive.zip');
+      if (!newFileName) {
+        break;
+      }
+
+      const target = utils.getTargetUrl(location.href) + encodeURIComponent(newFileName);
+      try {
+        const formData = new FormData();
+        formData.append('token', await utils.acquireToken(target));
+
+        const xhr = await utils.wsb({
+          url: target + '?a=mkzip&f=json',
+          responseType: 'json',
+          method: "POST",
+          formData: formData,
+        });
+      } catch (ex) {
+        alert(`Unable to create ZIP "${newFileName}": ${ex.message}`);
         break;
       }
       location.reload();

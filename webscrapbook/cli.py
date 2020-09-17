@@ -4,9 +4,7 @@
 import sys
 import os
 import argparse
-import json
 from getpass import getpass
-import time
 import traceback
 
 # this package
@@ -14,11 +12,16 @@ from . import __package_name__, __version__
 from . import *
 from . import server
 from . import util
+from ._compat.time import time_ns
 
-try:
-    from time import time_ns
-except ImportError:
-    from .lib.shim.time import time_ns
+
+def log(*args):
+    print(*args)
+
+
+def die(*args):
+    print(f'Error:', *args, file=sys.stderr)
+    sys.exit(1)
 
 
 def get_umask():
@@ -32,36 +35,33 @@ def get_umask():
 def fcopy(fsrc, fdst):
     """Copy a script file to target
 
+    - Auto generate ancestor directories.
     - Use universal linefeed.
     - Set last modified time to current time.
     """
     os.makedirs(os.path.dirname(os.path.abspath(fdst)), exist_ok=True)
-    with open(fsrc, 'r', encoding='UTF-8') as f:
-        content = f.read()
-        f.close()
-    with open(fdst, 'w', encoding='UTF-8') as f:
-        f.write(content)
-        f.close()
+    with open(fsrc, 'r', encoding='UTF-8') as fr:
+        with open(fdst, 'w', encoding='UTF-8') as fw:
+            for line in fr:
+                fw.write(line)
 
 
 def cmd_serve(args):
-    """Serve the directory."""
+    """Serve the root directory."""
     server.serve(args['root'])
 
 
 def cmd_config(args):
     """Show, generate, or edit config."""
     if args['book']:
-        filename = WSB_LOCAL_CONFIG
-        fdst = os.path.normpath(os.path.join(args['root'], WSB_DIR, filename))
-        fsrc = os.path.normpath(os.path.join(__file__, '..', 'resources', filename))
+        fdst = os.path.normpath(os.path.join(args['root'], WSB_DIR, WSB_LOCAL_CONFIG))
+        fsrc = os.path.normpath(os.path.join(__file__, '..', 'resources', 'config.ini'))
         if not os.path.isfile(fdst):
-            print('Generating "{}"...'.format(fdst))
+            log(f'Generating "{fdst}"...')
             try:
                 fcopy(fsrc, fdst)
-            except:
-                print("Error: Unable to generate {}.".format(fdst), file=sys.stderr)
-                sys.exit(1)
+            except OSError:
+                die(f"Unable to generate {fdst}.")
 
         if args['edit']:
             try:
@@ -70,40 +70,35 @@ def cmd_config(args):
                 pass
 
         if args['all']:
-            filename = 'serve.py'
-            fdst = os.path.normpath(os.path.join(args['root'], WSB_DIR, filename))
-            fsrc = os.path.normpath(os.path.join(__file__, '..', 'resources', filename))
+            fdst = os.path.normpath(os.path.join(args['root'], WSB_DIR, 'serve.py'))
+            fsrc = os.path.normpath(os.path.join(__file__, '..', 'resources', 'serve.py'))
             if not os.path.isfile(fdst):
-                print('Generating "{}"...'.format(fdst))
+                log(f'Generating "{fdst}"...')
                 try:
                     fcopy(fsrc, fdst)
                     os.chmod(fdst, os.stat(fdst).st_mode | (0o111 & ~get_umask()))
-                except:
-                    print("Error: Unable to generate {}.".format(fdst), file=sys.stderr)
-                    sys.exit(1)
+                except OSError:
+                    die(f"Unable to generate {fdst}.")
 
-            filename = 'serve.wsgi'
-            fdst = os.path.normpath(os.path.join(args['root'], WSB_DIR, filename))
-            fsrc = os.path.normpath(os.path.join(__file__, '..', 'resources', filename))
+            fdst = os.path.normpath(os.path.join(args['root'], WSB_DIR, 'app.py'))
+            fsrc = os.path.normpath(os.path.join(__file__, '..', 'resources', 'app.py'))
             if not os.path.isfile(fdst):
-                print('Generating "{}"...'.format(fdst))
+                log(f'Generating "{fdst}"...')
                 try:
                     fcopy(fsrc, fdst)
                     os.chmod(fdst, os.stat(fdst).st_mode | (0o111 & ~get_umask()))
-                except:
-                    print("Error: Unable to generate {}.".format(fdst), file=sys.stderr)
-                    sys.exit(1)
+                except OSError:
+                    die(f"Unable to generate {fdst}.")
 
     elif args['user']:
         fdst = WSB_USER_CONFIG
-        fsrc = os.path.normpath(os.path.join(__file__, '..', 'resources', WSB_LOCAL_CONFIG))
+        fsrc = os.path.normpath(os.path.join(__file__, '..', 'resources', 'config.ini'))
         if not os.path.isfile(fdst):
-            print('Generating "{}"...'.format(fdst))
+            log(f'Generating "{fdst}"...')
             try:
                 fcopy(fsrc, fdst)
-            except:
-                print("Error: Unable to generate {}.".format(fdst), file=sys.stderr)
-                sys.exit(1)
+            except OSError:
+                die(f"Unable to generate {fdst}.")
 
         if args['edit']:
             try:
@@ -112,23 +107,22 @@ def cmd_config(args):
                 pass
 
     elif args['edit']:
-        print("Error: Use --edit in combine with --book or --user.", file=sys.stderr)
-        sys.exit(1)
+        die("Use --edit in combine with --book or --user.")
 
     elif args['all']:
-        print("Error: Use --all in combine with --book.", file=sys.stderr)
-        sys.exit(1)
+        die("Use --all in combine with --book.")
 
     elif args['name']:
-        value = config.get(args['name'])
+        config.load(args['root'])
+        value = config.getname(args['name'])
 
         if value is None:
-            print("Error: Config entry '{}' does not exist".format(args['name']), file=sys.stderr)
-            sys.exit(1)
+            die(f"""Config entry "{args['name']}" does not exist""")
 
         print(value)
 
     else:
+        config.load(args['root'])
         config.dump(sys.stdout)
 
 
@@ -139,8 +133,7 @@ def cmd_encrypt(args):
         pw2 = getpass('Confirm the password: ')
 
         if pw1 != pw2:
-            print('Error: Entered passwords do not match.', file=sys.stderr)
-            sys.exit(1)
+            die('Entered passwords do not match.')
 
         args['password'] = pw1
 
@@ -155,12 +148,12 @@ def cmd_help(args):
         file = os.path.join(root, 'config.md')
         with open(file, 'r', encoding='UTF-8') as f:
             text = f.read()
-            f.close()
         print(text)
 
 
 def cmd_view(args):
     """View archive file(s) in the browser."""
+    config.load(args['root'])
     view_archive_files(args['files'])
 
 
@@ -172,59 +165,58 @@ def view_archive_files(files):
     """
     import tempfile
     import zipfile
-    import hashlib
-    import time
     import mimetypes
     import webbrowser
     import shutil
-    from urllib.parse import urljoin
     from urllib.request import pathname2url
 
     cache_prefix = config['browser']['cache_prefix']
-    cache_expire = config['browser'].getint('cache_expire') * 10 ** 9
-    use_jar = config['browser'].getboolean('use_jar')
+    cache_expire = config['browser']['cache_expire'] * 10 ** 9
+    use_jar = config['browser']['use_jar']
     browser = webbrowser.get(config['browser']['command'] or None)
 
     temp_dir = tempfile.gettempdir()
     urls = []
 
-    for file in files:
+    for file in dict.fromkeys(os.path.normcase(os.path.abspath(file)) for file in files):
         mime, _ = mimetypes.guess_type(file)
         if not mime in ("application/html+zip", "application/x-maff"):
             continue
 
         if use_jar:
-            base_url = 'jar:file:' + pathname2url(os.path.abspath(file)) + '!/'
+            base_url = 'jar:file:' + pathname2url(file) + '!/'
             if mime == "application/html+zip":
                 urls.append(base_url + 'index.html')
             elif mime == "application/x-maff":
-                urls.extend([base_url + f.indexfilename for f in util.get_maff_pages(file)])
+                urls.extend(base_url + f.indexfilename for f in util.get_maff_pages(file))
             continue
 
         # extract zip contents to dest_dir if not done yet
         hash = util.checksum(file)
         dest_prefix = cache_prefix + hash + '_'
-        for entry in os.listdir(temp_dir):
-            if entry.startswith(dest_prefix):
-                dest_dir = os.path.join(temp_dir, entry)
+        with os.scandir(temp_dir) as entries:
+            for entry in entries:
+                if not entry.name.startswith(dest_prefix):
+                    continue
+
+                dest_dir = entry.path
 
                 # update atime
                 atime = time_ns()
-                stat = os.stat(dest_dir)
-                os.utime(dest_dir, ns=(atime, stat.st_mtime_ns))
+                stat = os.stat(entry)
+                os.utime(entry, ns=(atime, stat.st_mtime_ns))
                 break
-        else:
-            dest_dir = tempfile.mkdtemp(prefix=dest_prefix)
-            with zipfile.ZipFile(file) as zip:
-                zip.extractall(dest_dir)
-                zip.close()
+            else:
+                dest_dir = tempfile.mkdtemp(prefix=dest_prefix)
+                with zipfile.ZipFile(file) as zip:
+                    zip.extractall(dest_dir)
 
         # get URL of every index page
         base_url = 'file:' + pathname2url(dest_dir) + '/'
         if mime == "application/html+zip":
             urls.append(base_url + 'index.html')
         elif mime == "application/x-maff":
-            urls.extend([base_url + f.indexfilename for f in util.get_maff_pages(file)])
+            urls.extend(base_url + f.indexfilename for f in util.get_maff_pages(file))
 
     # open pages in the browser
     for url in urls:
@@ -233,16 +225,20 @@ def view_archive_files(files):
     # remove stale caches
     if not use_jar:
         t = time_ns()
-        for entry in os.listdir(temp_dir):
-            if entry.startswith(cache_prefix):
-                cache_dir = os.path.join(temp_dir, entry)
-                atime = os.stat(cache_dir).st_atime_ns
-                if t > atime + cache_expire:
-                    # cache may be created by another user and undeletable
-                    try:
-                        shutil.rmtree(cache_dir)
-                    except:
-                        traceback.print_exc()
+        with os.scandir(temp_dir) as entries:
+            for entry in entries:
+                if not entry.name.startswith(cache_prefix):
+                    continue
+
+                atime = os.stat(entry).st_atime_ns
+                if t <= atime + cache_expire:
+                    continue
+
+                # cache may be created by another user and undeletable
+                try:
+                    shutil.rmtree(entry)
+                except OSError:
+                    traceback.print_exc()
 
 
 def view():
@@ -257,11 +253,14 @@ def view():
 
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument('--version', default=False, action='store_true',
+    parser.add_argument('--version', action='version', version=f'{__package_name__} {__version__}',
         help="""show version information and exit""")
     parser.add_argument('--root', default=".",
         help="""root directory to manipulate (default: current working directory)""")
-    subparsers = parser.add_subparsers(dest='command', metavar='COMMAND')
+    subparsers = parser.add_subparsers(metavar='COMMAND',
+        help="""The sub-command to run.
+Add -h (--help) after a sub-command for help message.
+(E.g. %(prog)s config -h)""")
 
     # subcommand: serve
     parser_serve = subparsers.add_parser('serve', aliases=['s'],
@@ -313,11 +312,10 @@ sha224, sha256, sha384, sha512, sha3_224, sha3_256, sha3_384, and sha3_512.
 
     # parse the command
     args = vars(parser.parse_args())
-    if args.get('func'):
-        args['func'](args)
-    elif args.get('version'):
-        print('{} {}'.format(__package_name__, __version__))
-    else:
+    try:
+        func = args.pop('func')
+        func(args)
+    except KeyError:
         parser.parse_args(['-h'])
 
 

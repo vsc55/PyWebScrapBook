@@ -1,0 +1,14 @@
+{% extends "base.html" %}
+{% block title %}Pages of {{ path }}{% endblock %}
+{% block content %}
+<h1 id="header">Pages of {{ path }}</h1>
+<ul>
+  {%- set root = os.path.basename(path) %}
+  {%- for page in pages %}
+    {%- set url = quote_path(root + '!/' + page.indexfilename) %}
+    {%- set label = page.indexfilename.partition('/')[0] %}
+    {%- set title = page.title or '' %}
+    <li><a href="{{ url }}" title="{{ title }}">{{ label }}</a></li>
+  {%- endfor %}
+</ul>
+{% endblock %}
