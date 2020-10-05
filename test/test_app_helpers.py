@@ -5,25 +5,29 @@ import os
 import shutil
 import io
 import zipfile
+import time
 from flask import current_app, request
 import webscrapbook
-from webscrapbook import WSB_DIR, WSB_LOCAL_CONFIG
+from webscrapbook import WSB_DIR, WSB_CONFIG
 from webscrapbook import app as wsbapp
 
 root_dir = os.path.abspath(os.path.dirname(__file__))
 server_root = os.path.join(root_dir, 'test_app_helpers')
 
-mocking = None
-
 def setUpModule():
-    # mock out WSB_USER_CONFIG
-    global mocking
-    mocking = mock.patch('webscrapbook.WSB_USER_CONFIG', server_root)
-    mocking.start()
+    # mock out user config
+    global mockings
+    mockings = [
+        mock.patch('webscrapbook.WSB_USER_DIR', server_root, 'wsb'),
+        mock.patch('webscrapbook.WSB_USER_CONFIG', server_root),
+        ]
+    for mocking in mockings:
+        mocking.start()
 
 def tearDownModule():
     # stop mock
-    mocking.stop()
+    for mocking in mockings:
+        mocking.stop()
 
 class TestFunctions(unittest.TestCase):
     def test_is_local_access(self):
@@ -692,7 +696,7 @@ class TestFunctions(unittest.TestCase):
         """Return corresponding permission for the matched user and '' for unmatched."""
         root = os.path.join(root_dir, 'test_app_helpers', 'get_permission1')
         app = wsbapp.make_app(root)
-        auth_config = app.config['WEBSCRAPBOOK_RUNTIME']['config']['auth']
+        auth_config = app.config['WEBSCRAPBOOK_HOST'].config['auth']
         with app.app_context():
             # util.encrypt should be called with the inputting password
             # and the salt and method for the matched user
@@ -749,7 +753,7 @@ class TestFunctions(unittest.TestCase):
         """Use empty user and password if not provided."""
         root = os.path.join(root_dir, 'test_app_helpers', 'get_permission2')
         app = wsbapp.make_app(root)
-        auth_config = app.config['WEBSCRAPBOOK_RUNTIME']['config']['auth']
+        auth_config = app.config['WEBSCRAPBOOK_HOST'].config['auth']
         with app.app_context():
             self.assertEqual(wsbapp.get_permission(None, auth_config), 'view')
             mock_encrypt.assert_called_with('', 'salt', 'plain')
@@ -762,7 +766,7 @@ class TestFunctions(unittest.TestCase):
         """Use permission for the first matched user and password."""
         root = os.path.join(root_dir, 'test_app_helpers', 'get_permission3')
         app = wsbapp.make_app(root)
-        auth_config = app.config['WEBSCRAPBOOK_RUNTIME']['config']['auth']
+        auth_config = app.config['WEBSCRAPBOOK_HOST'].config['auth']
         with app.app_context():
             mock_encrypt.reset_mock()
             self.assertEqual(wsbapp.get_permission({'username': '', 'password': ''}, auth_config), 'view')
@@ -801,7 +805,7 @@ class TestFunctions(unittest.TestCase):
 
         app = wsbapp.make_app(root)
         with app.app_context():
-            self.assertEqual(current_app.config['WEBSCRAPBOOK_RUNTIME']['config']['app']['name'], 'mywsb1')
+            self.assertEqual(current_app.config['WEBSCRAPBOOK_HOST'].config['app']['name'], 'mywsb1')
 
     def test_make_app2(self):
         # pass root, config
@@ -812,7 +816,7 @@ class TestFunctions(unittest.TestCase):
 
         app = wsbapp.make_app(root, config)
         with app.app_context():
-            self.assertEqual(current_app.config['WEBSCRAPBOOK_RUNTIME']['config']['app']['name'], 'mywsb2')
+            self.assertEqual(current_app.config['WEBSCRAPBOOK_HOST'].config['app']['name'], 'mywsb2')
 
 class TestRequest(unittest.TestCase):
     def test_action(self):
@@ -869,7 +873,209 @@ class TestHandlers(unittest.TestCase):
             r = c.get('/nonexist')
             self.assertEqual(r.status_code, 404)
             html = r.data.decode('UTF-8')
-            self.assertTrue('<h1>Not Found</h1>' in html)
+            self.assertIn('<h1>Not Found</h1>', html)
+
+
+
+class TestWebHost(unittest.TestCase):
+    def setUp(self):
+        self.test_dir = os.path.join(root_dir, 'test_app_helpers', 'general')
+        self.token_dir = os.path.join(root_dir, 'test_app_helpers', 'general', WSB_DIR, 'server', 'tokens')
+        os.makedirs(self.token_dir, exist_ok=True)
+
+    def tearDown(self):
+        try:
+            shutil.rmtree(self.token_dir)
+        except NotADirectoryError:
+            os.remove(self.token_dir)
+        except FileNotFoundError:
+            pass
+
+    @mock.patch('webscrapbook.app.WebHost.token_check_delete_expire')
+    @mock.patch('webscrapbook.app.WebHost.TOKEN_DEFAULT_EXPIRY', 10)
+    def test_token_acquire1(self, mock_check):
+        now = time.time()
+        expected_expire_time = int(now) + 10
+
+        handler = wsbapp.WebHost(self.test_dir)
+        token = handler.token_acquire()
+        token_file = os.path.join(self.token_dir, token)
+
+        self.assertTrue(os.path.isfile(token_file))
+        with open(token_file, 'r', encoding='UTF-8') as f:
+            self.assertAlmostEqual(int(f.read()), expected_expire_time, delta=1)
+        self.assertAlmostEqual(mock_check.call_args[0][0], now, delta=1)
+
+    @mock.patch('webscrapbook.app.WebHost.token_check_delete_expire')
+    @mock.patch('webscrapbook.app.WebHost.TOKEN_DEFAULT_EXPIRY', 30)
+    def test_token_acquire2(self, mock_check):
+        now = 30000
+        expected_expire_time = int(now) + 30
+
+        handler = wsbapp.WebHost(self.test_dir)
+        token = handler.token_acquire(now)
+        token_file = os.path.join(self.token_dir, token)
+
+        self.assertTrue(os.path.isfile(token_file))
+        with open(token_file, 'r', encoding='UTF-8') as f:
+            self.assertEqual(int(f.read()), expected_expire_time)
+        self.assertEqual(mock_check.call_args[0][0], now)
+
+    def test_token_validate1(self):
+        token = 'sampleToken'
+        token_time = int(time.time()) + 3
+
+        token_file = os.path.join(self.token_dir, token)
+        with open(token_file, 'w', encoding='UTF-8') as f:
+            f.write(str(token_time))
+
+        handler = wsbapp.WebHost(self.test_dir)
+        self.assertTrue(handler.token_validate(token))
+
+    def test_token_validate2(self):
+        token = 'sampleToken'
+        token_time = int(time.time()) - 3
+
+        token_file = os.path.join(self.token_dir, token)
+        with open(token_file, 'w', encoding='UTF-8') as f:
+            f.write(str(token_time))
+
+        handler = wsbapp.WebHost(self.test_dir)
+        self.assertFalse(handler.token_validate(token))
+
+    def test_token_validate3(self):
+        token = 'sampleToken'
+        now = 30000
+        token_time = 30001
+
+        token_file = os.path.join(self.token_dir, token)
+        with open(token_file, 'w', encoding='UTF-8') as f:
+            f.write(str(token_time))
+
+        handler = wsbapp.WebHost(self.test_dir)
+        self.assertTrue(handler.token_validate(token, now))
+
+    def test_token_validate4(self):
+        token = 'sampleToken'
+        now = 30000
+        token_time = 29999
+
+        token_file = os.path.join(self.token_dir, token)
+        with open(token_file, 'w', encoding='UTF-8') as f:
+            f.write(str(token_time))
+
+        handler = wsbapp.WebHost(self.test_dir)
+        self.assertFalse(handler.token_validate(token, now))
+
+    def test_token_delete(self):
+        token = 'sampleToken'
+
+        token_file = os.path.join(self.token_dir, token)
+        with open(token_file, 'w', encoding='UTF-8') as f:
+            f.write(str(32768))
+
+        handler = wsbapp.WebHost(self.test_dir)
+        handler.token_delete(token)
+        self.assertFalse(os.path.exists(token_file))
+
+    def test_token_delete_expire1(self):
+        now = int(time.time())
+
+        with open(os.path.join(self.token_dir, 'sampleToken1'), 'w', encoding='UTF-8') as f:
+            f.write(str(now - 100))
+        with open(os.path.join(self.token_dir, 'sampleToken2'), 'w', encoding='UTF-8') as f:
+            f.write(str(now - 10))
+        with open(os.path.join(self.token_dir, 'sampleToken3'), 'w', encoding='UTF-8') as f:
+            f.write(str(now + 10))
+        with open(os.path.join(self.token_dir, 'sampleToken4'), 'w', encoding='UTF-8') as f:
+            f.write(str(now + 100))
+
+        handler = wsbapp.WebHost(self.test_dir)
+        handler.token_delete_expire()
+
+        self.assertFalse(os.path.exists(os.path.join(self.token_dir, 'sampleToken1')))
+        self.assertFalse(os.path.exists(os.path.join(self.token_dir, 'sampleToken2')))
+        self.assertTrue(os.path.exists(os.path.join(self.token_dir, 'sampleToken3')))
+        self.assertTrue(os.path.exists(os.path.join(self.token_dir, 'sampleToken4')))
+
+    def test_token_delete_expire2(self):
+        now = 30000
+
+        with open(os.path.join(self.token_dir, 'sampleToken1'), 'w', encoding='UTF-8') as f:
+            f.write(str(29000))
+        with open(os.path.join(self.token_dir, 'sampleToken2'), 'w', encoding='UTF-8') as f:
+            f.write(str(29100))
+        with open(os.path.join(self.token_dir, 'sampleToken3'), 'w', encoding='UTF-8') as f:
+            f.write(str(30100))
+        with open(os.path.join(self.token_dir, 'sampleToken4'), 'w', encoding='UTF-8') as f:
+            f.write(str(30500))
+
+        handler = wsbapp.WebHost(self.test_dir)
+        handler.token_delete_expire(now)
+
+        self.assertFalse(os.path.exists(os.path.join(self.token_dir, 'sampleToken1')))
+        self.assertFalse(os.path.exists(os.path.join(self.token_dir, 'sampleToken2')))
+        self.assertTrue(os.path.exists(os.path.join(self.token_dir, 'sampleToken3')))
+        self.assertTrue(os.path.exists(os.path.join(self.token_dir, 'sampleToken4')))
+
+    @mock.patch('webscrapbook.app.WebHost.token_delete_expire')
+    def test_token_check_delete_expire1(self, mock_delete):
+        now = int(time.time())
+
+        handler = wsbapp.WebHost(self.test_dir)
+        self.assertEqual(handler.token_last_purge, 0)
+
+        handler.token_check_delete_expire()
+        self.assertAlmostEqual(mock_delete.call_args[0][0], now, delta=1)
+        self.assertAlmostEqual(handler.token_last_purge, now, delta=1)
+
+    @mock.patch('webscrapbook.app.WebHost.token_delete_expire')
+    @mock.patch('webscrapbook.app.WebHost.TOKEN_PURGE_INTERVAL', 1000)
+    def test_token_check_delete_expire2(self, mock_delete):
+        now = int(time.time())
+
+        handler = wsbapp.WebHost(self.test_dir)
+        handler.token_last_purge = now - 1100
+
+        handler.token_check_delete_expire()
+        self.assertAlmostEqual(mock_delete.call_args[0][0], now, delta=1)
+        self.assertAlmostEqual(handler.token_last_purge, now, delta=1)
+
+    @mock.patch('webscrapbook.app.WebHost.token_delete_expire')
+    @mock.patch('webscrapbook.app.WebHost.TOKEN_PURGE_INTERVAL', 1000)
+    def test_token_check_delete_expire3(self, mock_delete):
+        now = int(time.time())
+
+        handler = wsbapp.WebHost(self.test_dir)
+        handler.token_last_purge = now - 900
+
+        handler.token_check_delete_expire()
+        mock_delete.assert_not_called()
+        self.assertEqual(handler.token_last_purge, now - 900)
+
+    @mock.patch('webscrapbook.app.WebHost.token_delete_expire')
+    @mock.patch('webscrapbook.app.WebHost.TOKEN_PURGE_INTERVAL', 1000)
+    def test_token_check_delete_expire4(self, mock_delete):
+        now = 40000
+
+        handler = wsbapp.WebHost(self.test_dir)
+        handler.token_last_purge = now - 1100
+
+        handler.token_check_delete_expire(now)
+        self.assertAlmostEqual(mock_delete.call_args[0][0], now, delta=1)
+        self.assertAlmostEqual(handler.token_last_purge, now, delta=1)
+
+    @mock.patch('webscrapbook.app.WebHost.token_delete_expire')
+    @mock.patch('webscrapbook.app.WebHost.TOKEN_PURGE_INTERVAL', 1000)
+    def test_token_check_delete_expire5(self, mock_delete):
+        now = 40000
+
+        handler = wsbapp.WebHost(self.test_dir)
+        handler.token_last_purge = now - 900
+
+        handler.token_check_delete_expire(now)
+        mock_delete.assert_not_called()
+        self.assertEqual(handler.token_last_purge, now - 900)
 
 if __name__ == '__main__':
     unittest.main()

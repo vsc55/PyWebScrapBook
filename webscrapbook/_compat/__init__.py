@@ -1,4 +1,3 @@
-#!/usr/bin/env python3
 """Compatibility shims
 """
 import io
@@ -9,9 +8,9 @@ def zip_stream(file, chunk_size=8192):
     if not file.seekable():
         buffer = io.BytesIO()
         while True:
-            bytes = file.read(chunk_size)
-            if not bytes: break
-            buffer.write(bytes)
+            chunk = file.read(chunk_size)
+            if not chunk: break
+            buffer.write(chunk)
         file.close()
         file = buffer
     return file

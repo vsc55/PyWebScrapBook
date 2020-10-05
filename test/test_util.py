@@ -9,12 +9,16 @@ import io
 import time
 import zipfile
 import collections
+from datetime import datetime, timezone, timedelta
 from webscrapbook import util
-from webscrapbook.util import frozendict
+from webscrapbook.util import frozendict, zip_tuple_timestamp
 
 root_dir = os.path.abspath(os.path.dirname(__file__))
 
 class TestUtils(unittest.TestCase):
+    def setUp(self):
+        self.maxDiff = 8192
+
     def test_frozendict(self):
         dict_ = {'a': 1, 'b': 2, 'c': 3}
         frozendict_ = frozendict(dict_)
@@ -27,7 +31,7 @@ class TestUtils(unittest.TestCase):
         self.assertRegex(repr(frozendict_), r'^frozendict\([^)]*\)$')
 
         self.assertTrue(frozendict_ == dict_)
-        self.assertTrue('a' in frozendict_)
+        self.assertIn('a', frozendict_)
         self.assertEqual(set(frozendict_), {'a', 'b', 'c'})
         self.assertEqual(list(reversed(frozendict_)), list(frozendict_)[::-1])
 
@@ -60,6 +64,99 @@ class TestUtils(unittest.TestCase):
             set(util.make_hashable([{'a': 123, 'b': 456}, [1, 2, 3]])),
             {(1, 2, 3), frozendict({'a': 123, 'b': 456})}
             )
+
+    def test_datetime_to_id(self):
+        # create an ID from UTC time
+        self.assertEqual(
+            util.datetime_to_id(datetime(2020, 1, 2, 3, 4, 5, 67000, tzinfo=timezone.utc)),
+            '20200102030405067')
+
+        # create an ID from corresponding UTC time if datetime is another timezone
+        self.assertEqual(
+            util.datetime_to_id(datetime(2020, 1, 2, 3, 4, 5, 67000, tzinfo=timezone(timedelta(hours=8)))),
+            '20200101190405067')
+
+        # create for now if datetime not provided
+        self.assertAlmostEqual(
+            util.id_to_datetime(util.datetime_to_id(None)).timestamp(),
+            datetime.now(timezone.utc).timestamp(),
+            delta=3)
+
+    def test_datetime_to_id_legacy(self):
+        # create an ID from local datetime
+        self.assertEqual(
+            util.datetime_to_id_legacy(datetime(2020, 1, 2, 3, 4, 5, 67000)),
+            '20200102030405')
+
+        # create an ID from corresponding local time if datetime is another timezone
+        self.assertEqual(
+            util.datetime_to_id_legacy(datetime(2020, 1, 2, 3, 4, 5, 67000, tzinfo=timezone.utc)),
+            util.datetime_to_id_legacy(datetime(2020, 1, 2, 3, 4, 5, 67000) + datetime.now().astimezone().utcoffset())
+            )
+
+        # create for now if datetime not provided
+        self.assertAlmostEqual(
+            util.id_to_datetime_legacy(util.datetime_to_id_legacy(None)).timestamp(),
+            datetime.now().timestamp(),
+            delta=3)
+
+    def test_id_to_datetime(self):
+        self.assertEqual(util.id_to_datetime('20200102030405067'),
+            datetime(2020, 1, 2, 3, 4, 5, 67000, timezone.utc))
+        self.assertIsNone(util.id_to_datetime('20200102030405'), None)
+
+    def test_id_to_datetime_legacy(self):
+        self.assertEqual(util.id_to_datetime_legacy('20200102030405'),
+            datetime(2020, 1, 2, 3, 4, 5))
+        self.assertIsNone(util.id_to_datetime_legacy('20200102'), None)
+
+    def test_crop(self):
+        self.assertEqual(util.crop('dummy text', 10), 'dummy text')
+        self.assertEqual(util.crop('dummy text', 9), 'dummy ...')
+        self.assertEqual(util.crop('dummy text', 8), 'dummy...')
+        self.assertEqual(util.crop('dummy text', 7), 'dumm...')
+        self.assertEqual(util.crop('dummy text', 4), 'd...')
+        self.assertEqual(util.crop('dummy text', 3), '...')
+        self.assertEqual(util.crop('dummy text', 2), '...')
+        self.assertEqual(util.crop('dummy text', 1), '...')
+        self.assertEqual(util.crop('dummy text', 0), '...')
+
+        self.assertEqual(util.crop('中文字串𠀀', 5), '中文字串𠀀')
+        self.assertEqual(util.crop('中文字串𠀀', 4), '中...')
+
+    def test_fix_codec(self):
+        self.assertEqual(util.fix_codec('big5'), 'cp950')
+        self.assertEqual(util.fix_codec('BIG5'), 'cp950')
+        self.assertEqual(util.fix_codec('UTF-8'), 'UTF-8')
+
+    def test_sniff_bom(self):
+        fh = io.BytesIO(b'\xef\xbb\xbf' + '中文'.encode('UTF-8'))
+        self.assertEqual(util.sniff_bom(fh), 'UTF-8-SIG')
+        self.assertEqual(fh.tell(), 3)
+
+        fh = io.BytesIO(b'\xff\xfe' + '中文'.encode('UTF-16-LE'))
+        self.assertEqual(util.sniff_bom(fh), 'UTF-16-LE')
+        self.assertEqual(fh.tell(), 2)
+
+        fh = io.BytesIO(b'\xfe\xff' + '中文'.encode('UTF-16-BE'))
+        self.assertEqual(util.sniff_bom(fh), 'UTF-16-BE')
+        self.assertEqual(fh.tell(), 2)
+
+        fh = io.BytesIO(b'\xff\xfe\x00\x00' + '中文'.encode('UTF-32-LE'))
+        self.assertEqual(util.sniff_bom(fh), 'UTF-32-LE')
+        self.assertEqual(fh.tell(), 4)
+
+        fh = io.BytesIO(b'\x00\x00\xfe\xff' + '中文'.encode('UTF-32-BE'))
+        self.assertEqual(util.sniff_bom(fh), 'UTF-32-BE')
+        self.assertEqual(fh.tell(), 4)
+
+        fh = io.BytesIO('中文'.encode('UTF-8'))
+        self.assertIsNone(util.sniff_bom(fh))
+        self.assertEqual(fh.tell(), 0)
+
+        fh = io.BytesIO('中文'.encode('Big5'))
+        self.assertIsNone(util.sniff_bom(fh))
+        self.assertEqual(fh.tell(), 0)
 
     def test_is_nullhost(self):
         self.assertTrue(util.is_nullhost('0.0.0.0'))
@@ -167,6 +264,53 @@ class TestUtils(unittest.TestCase):
             ('directory', '/path/to/directory/', '/', True)
             ])
 
+
+    def test_get_relative_url(self):
+        self.assertEqual(
+            util.get_relative_url(
+                os.path.join(root_dir),
+                os.path.join(root_dir, 'tree', 'meta.js'),
+                start_is_dir=False,
+                ),
+            '../',
+            )
+
+        self.assertEqual(
+            util.get_relative_url(
+                os.path.join(root_dir, 'tree', 'icon'),
+                os.path.join(root_dir, 'data', '20200101000000000'),
+                ),
+            '../../tree/icon/',
+            )
+
+        self.assertEqual(
+            util.get_relative_url(
+                os.path.join(root_dir, 'tree', 'icon', 'dummy.png'),
+                os.path.join(root_dir, 'data', '20200101000000000'),
+                path_is_dir=False,
+                ),
+            '../../tree/icon/dummy.png',
+            )
+
+        self.assertEqual(
+            util.get_relative_url(
+                os.path.join(root_dir, 'data', '20200102000000000'),
+                os.path.join(root_dir, 'data', '20200101000000000'),
+                ),
+            '../20200102000000000/',
+            )
+
+        self.assertEqual(
+            util.get_relative_url(
+                os.path.join(root_dir, '中文#456.png'),
+                os.path.join(root_dir, '中文#123.png'),
+                path_is_dir=False,
+                start_is_dir=False,
+                ),
+            '%E4%B8%AD%E6%96%87%23456.png',
+            )
+
+
     def test_checksum(self):
         self.assertEqual(
             util.checksum(os.path.join(root_dir, 'test_util', 'checksum', 'checksum.txt')),
@@ -176,6 +320,17 @@ class TestUtils(unittest.TestCase):
         self.assertEqual(
             util.checksum(os.path.join(root_dir, 'test_util', 'checksum', 'checksum.txt'), method='sha256'),
             'e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855'
+            )
+
+        # file-like
+        self.assertEqual(
+            util.checksum(io.BytesIO(b''), method='sha256'),
+            'e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855'
+            )
+
+        self.assertEqual(
+            util.checksum(io.BytesIO(b'ABC'), method='sha256'),
+            'b5d4045c3f466fa91fe2cc6abe79232a1a57cdf104f7a26e716e0a1e2789df78'
             )
 
     @unittest.skipUnless(platform.system() == 'Windows', 'requires Windows')
@@ -453,6 +608,128 @@ class TestUtils(unittest.TestCase):
         self.assertTrue(util.is_compressible('application/xhtml+xml'))
         self.assertTrue(util.is_compressible('application/ld+json'))
 
+    def test_mime_is_html(self):
+        self.assertTrue(util.mime_is_html('text/html'))
+        self.assertTrue(util.mime_is_html('application/xhtml+xml'))
+        self.assertFalse(util.mime_is_html('application/html+zip'))
+        self.assertFalse(util.mime_is_html('application/x-maff'))
+        self.assertFalse(util.mime_is_html('text/plain'))
+        self.assertFalse(util.mime_is_html('text/markdown'))
+        self.assertFalse(util.mime_is_html('text/xml'))
+        self.assertFalse(util.mime_is_html('image/svg+xml'))
+        self.assertFalse(util.mime_is_html('application/octet-stream'))
+
+    def test_mime_is_archive(self):
+        self.assertFalse(util.mime_is_archive('text/html'))
+        self.assertFalse(util.mime_is_archive('application/xhtml+xml'))
+        self.assertTrue(util.mime_is_archive('application/html+zip'))
+        self.assertTrue(util.mime_is_archive('application/x-maff'))
+        self.assertFalse(util.mime_is_archive('text/plain'))
+        self.assertFalse(util.mime_is_archive('text/markdown'))
+        self.assertFalse(util.mime_is_archive('text/xml'))
+        self.assertFalse(util.mime_is_archive('image/svg+xml'))
+        self.assertFalse(util.mime_is_archive('application/octet-stream'))
+
+    def test_mime_is_htz(self):
+        self.assertFalse(util.mime_is_htz('text/html'))
+        self.assertFalse(util.mime_is_htz('application/xhtml+xml'))
+        self.assertTrue(util.mime_is_htz('application/html+zip'))
+        self.assertFalse(util.mime_is_htz('application/x-maff'))
+        self.assertFalse(util.mime_is_htz('text/plain'))
+        self.assertFalse(util.mime_is_htz('text/markdown'))
+        self.assertFalse(util.mime_is_htz('text/xml'))
+        self.assertFalse(util.mime_is_htz('image/svg+xml'))
+        self.assertFalse(util.mime_is_htz('application/octet-stream'))
+
+    def test_mime_is_maff(self):
+        self.assertFalse(util.mime_is_maff('text/html'))
+        self.assertFalse(util.mime_is_maff('application/xhtml+xml'))
+        self.assertFalse(util.mime_is_maff('application/html+zip'))
+        self.assertTrue(util.mime_is_maff('application/x-maff'))
+        self.assertFalse(util.mime_is_maff('text/plain'))
+        self.assertFalse(util.mime_is_maff('text/markdown'))
+        self.assertFalse(util.mime_is_maff('text/xml'))
+        self.assertFalse(util.mime_is_maff('image/svg+xml'))
+        self.assertFalse(util.mime_is_maff('application/octet-stream'))
+
+    def test_mime_is_markdown(self):
+        self.assertFalse(util.mime_is_markdown('text/html'))
+        self.assertFalse(util.mime_is_markdown('application/xhtml+xml'))
+        self.assertFalse(util.mime_is_markdown('application/html+zip'))
+        self.assertFalse(util.mime_is_markdown('application/x-maff'))
+        self.assertFalse(util.mime_is_markdown('text/plain'))
+        self.assertTrue(util.mime_is_markdown('text/markdown'))
+        self.assertFalse(util.mime_is_markdown('text/xml'))
+        self.assertFalse(util.mime_is_markdown('image/svg+xml'))
+        self.assertFalse(util.mime_is_markdown('application/octet-stream'))
+
+    def test_is_html(self):
+        self.assertTrue(util.is_html('index.html'))
+        self.assertTrue(util.is_html('index.xhtml'))
+        self.assertFalse(util.is_html('20200101000000000.htz'))
+        self.assertFalse(util.is_html('20200101000000000.maff'))
+        self.assertFalse(util.is_html('20200101000000000/index.md'))
+        self.assertFalse(util.is_html('20200101000000000/test.txt'))
+        self.assertFalse(util.is_html('20200101000000000/test.xml'))
+        self.assertFalse(util.is_html('20200101000000000/test.svg'))
+        self.assertFalse(util.is_html('20200101000000000/whatever'))
+
+    def test_is_archive(self):
+        self.assertFalse(util.is_archive('index.html'))
+        self.assertFalse(util.is_archive('index.xhtml'))
+        self.assertTrue(util.is_archive('20200101000000000.htz'))
+        self.assertTrue(util.is_archive('20200101000000000.maff'))
+        self.assertFalse(util.is_archive('20200101000000000/index.md'))
+        self.assertFalse(util.is_archive('20200101000000000/test.txt'))
+        self.assertFalse(util.is_archive('20200101000000000/test.xml'))
+        self.assertFalse(util.is_archive('20200101000000000/test.svg'))
+        self.assertFalse(util.is_archive('20200101000000000/whatever'))
+
+    def test_is_htz(self):
+        self.assertFalse(util.is_htz('index.html'))
+        self.assertFalse(util.is_htz('index.xhtml'))
+        self.assertTrue(util.is_htz('20200101000000000.htz'))
+        self.assertFalse(util.is_htz('20200101000000000.maff'))
+        self.assertFalse(util.is_htz('20200101000000000/index.md'))
+        self.assertFalse(util.is_htz('20200101000000000/test.txt'))
+        self.assertFalse(util.is_htz('20200101000000000/test.xml'))
+        self.assertFalse(util.is_htz('20200101000000000/test.svg'))
+        self.assertFalse(util.is_htz('20200101000000000/whatever'))
+
+    def test_is_maff(self):
+        self.assertFalse(util.is_maff('index.html'))
+        self.assertFalse(util.is_maff('index.xhtml'))
+        self.assertFalse(util.is_maff('20200101000000000.htz'))
+        self.assertTrue(util.is_maff('20200101000000000.maff'))
+        self.assertFalse(util.is_maff('20200101000000000/index.md'))
+        self.assertFalse(util.is_maff('20200101000000000/test.txt'))
+        self.assertFalse(util.is_maff('20200101000000000/test.xml'))
+        self.assertFalse(util.is_maff('20200101000000000/test.svg'))
+        self.assertFalse(util.is_maff('20200101000000000/whatever'))
+
+    def test_is_markdown(self):
+        self.assertFalse(util.is_markdown('index.html'))
+        self.assertFalse(util.is_markdown('index.xhtml'))
+        self.assertFalse(util.is_markdown('20200101000000000.htz'))
+        self.assertFalse(util.is_markdown('20200101000000000.maff'))
+        self.assertTrue(util.is_markdown('20200101000000000/index.md'))
+        self.assertFalse(util.is_markdown('20200101000000000/test.txt'))
+        self.assertFalse(util.is_markdown('20200101000000000/test.xml'))
+        self.assertFalse(util.is_markdown('20200101000000000/test.svg'))
+        self.assertFalse(util.is_markdown('20200101000000000/whatever'))
+
+    def test_zip_tuple_timestamp(self):
+        self.assertEqual(
+            util.zip_tuple_timestamp((1987, 1, 1, 0, 0, 0)),
+            time.mktime((1987, 1, 1, 0, 0, 0, 0, 0, -1))
+            )
+
+    def test_zip_timestamp(self):
+        self.assertEqual(
+            util.zip_timestamp(zipfile.ZipInfo('dummy', (1987, 1, 1, 0, 0, 0))),
+            time.mktime((1987, 1, 1, 0, 0, 0, 0, 0, -1))
+            )
+
     def test_zip_file_info(self):
         zip_filename = os.path.join(root_dir, 'test_util', 'zipfile.zip')
         try:
@@ -464,22 +741,22 @@ class TestUtils(unittest.TestCase):
 
             self.assertEqual(
                 util.zip_file_info(zip_filename, 'file.txt'),
-                ('file.txt', 'file', 6, 536428800)
+                ('file.txt', 'file', 6, zip_tuple_timestamp((1987, 1, 1, 0, 0, 0)))
                 )
 
             self.assertEqual(
                 util.zip_file_info(zip_filename, 'folder'),
-                ('folder', 'dir', None, 567964800)
+                ('folder', 'dir', None, zip_tuple_timestamp((1988, 1, 1, 0, 0, 0)))
                 )
 
             self.assertEqual(
                 util.zip_file_info(zip_filename, 'folder/'),
-                ('folder', 'dir', None, 567964800)
+                ('folder', 'dir', None, zip_tuple_timestamp((1988, 1, 1, 0, 0, 0)))
                 )
 
             self.assertEqual(
                 util.zip_file_info(zip_filename, 'folder/.gitkeep'),
-                ('.gitkeep', 'file', 3, 599587200)
+                ('.gitkeep', 'file', 3, zip_tuple_timestamp((1989, 1, 1, 0, 0, 0)))
                 )
 
             self.assertEqual(
@@ -504,7 +781,7 @@ class TestUtils(unittest.TestCase):
 
             self.assertEqual(
                 util.zip_file_info(zip_filename, 'implicit_folder/.gitkeep'),
-                ('.gitkeep', 'file', 4, 631123200)
+                ('.gitkeep', 'file', 4, zip_tuple_timestamp((1990, 1, 1, 0, 0, 0)))
                 )
 
             self.assertEqual(
@@ -521,7 +798,7 @@ class TestUtils(unittest.TestCase):
             with zipfile.ZipFile(zip_filename, 'r') as zip:
                 self.assertEqual(
                     util.zip_file_info(zip, 'file.txt'),
-                    ('file.txt', 'file', 6, 536428800)
+                    ('file.txt', 'file', 6, zip_tuple_timestamp((1987, 1, 1, 0, 0, 0)))
                     )
         finally:
             try:
@@ -539,39 +816,39 @@ class TestUtils(unittest.TestCase):
                 zh.writestr(zipfile.ZipInfo('implicit_folder/.gitkeep', (1990, 1, 1, 0, 0, 0)), '1234')
 
             self.assertEqual(set(util.zip_listdir(zip_filename, '')), {
-                ('folder', 'dir', None, 567964800),
+                ('folder', 'dir', None, zip_tuple_timestamp((1988, 1, 1, 0, 0, 0))),
                 ('implicit_folder', 'dir', None, None),
-                ('file.txt', 'file', 6, 536428800),
+                ('file.txt', 'file', 6, zip_tuple_timestamp((1987, 1, 1, 0, 0, 0))),
                 })
 
             self.assertEqual(set(util.zip_listdir(zip_filename, '/')), {
-                ('folder', 'dir', None, 567964800),
+                ('folder', 'dir', None, zip_tuple_timestamp((1988, 1, 1, 0, 0, 0))),
                 ('implicit_folder', 'dir', None, None),
-                ('file.txt', 'file', 6, 536428800),
+                ('file.txt', 'file', 6, zip_tuple_timestamp((1987, 1, 1, 0, 0, 0))),
                 })
 
             self.assertEqual(set(util.zip_listdir(zip_filename, '', recursive=True)), {
-                ('folder', 'dir', None, 567964800),
-                ('folder/.gitkeep', 'file', 3, 599587200),
+                ('folder', 'dir', None, zip_tuple_timestamp((1988, 1, 1, 0, 0, 0))),
+                ('folder/.gitkeep', 'file', 3, zip_tuple_timestamp((1989, 1, 1, 0, 0, 0))),
                 ('implicit_folder', 'dir', None, None),
-                ('implicit_folder/.gitkeep', 'file', 4, 631123200),
-                ('file.txt', 'file', 6, 536428800),
+                ('implicit_folder/.gitkeep', 'file', 4, zip_tuple_timestamp((1990, 1, 1, 0, 0, 0))),
+                ('file.txt', 'file', 6, zip_tuple_timestamp((1987, 1, 1, 0, 0, 0))),
                 })
 
             self.assertEqual(set(util.zip_listdir(zip_filename, 'folder')), {
-                ('.gitkeep', 'file', 3, 599587200)
+                ('.gitkeep', 'file', 3, zip_tuple_timestamp((1989, 1, 1, 0, 0, 0)))
                 })
 
             self.assertEqual(set(util.zip_listdir(zip_filename, 'folder/')), {
-                ('.gitkeep', 'file', 3, 599587200)
+                ('.gitkeep', 'file', 3, zip_tuple_timestamp((1989, 1, 1, 0, 0, 0)))
                 })
 
             self.assertEqual(set(util.zip_listdir(zip_filename, 'implicit_folder')), {
-                ('.gitkeep', 'file', 4, 631123200)
+                ('.gitkeep', 'file', 4, zip_tuple_timestamp((1990, 1, 1, 0, 0, 0)))
                 })
 
             self.assertEqual(set(util.zip_listdir(zip_filename, 'implicit_folder/')), {
-                ('.gitkeep', 'file', 4, 631123200)
+                ('.gitkeep', 'file', 4, zip_tuple_timestamp((1990, 1, 1, 0, 0, 0)))
                 })
 
             with self.assertRaises(util.ZipDirNotFoundError):
@@ -586,9 +863,9 @@ class TestUtils(unittest.TestCase):
             # take zipfile.ZipFile
             with zipfile.ZipFile(zip_filename, 'r') as zip:
                 self.assertEqual(set(util.zip_listdir(zip, '')), {
-                    ('folder', 'dir', None, 567964800),
+                    ('folder', 'dir', None, zip_tuple_timestamp((1988, 1, 1, 0, 0, 0))),
                     ('implicit_folder', 'dir', None, None),
-                    ('file.txt', 'file', 6, 536428800),
+                    ('file.txt', 'file', 6, zip_tuple_timestamp((1987, 1, 1, 0, 0, 0))),
                     })
         finally:
             try:
@@ -621,18 +898,125 @@ class TestUtils(unittest.TestCase):
             except FileNotFoundError:
                 pass
 
-    def test_parse_meta_refresh(self):
+    def test_parse_content_type(self):
         self.assertEqual(
-            util.parse_meta_refresh(os.path.join(root_dir, 'test_util', 'parse_meta_refresh', 'refresh1.html')),
-            (0, 'target.html')
+            util.parse_content_type('text/html; charset=UTF-8'),
+            ('text/html', {'charset': 'UTF-8'}),
             )
         self.assertEqual(
-            util.parse_meta_refresh(os.path.join(root_dir, 'test_util', 'parse_meta_refresh', 'refresh2.html')),
-            (0, 'target.html')
+            util.parse_content_type('text/html; charset="UTF-8"'),
+            ('text/html', {'charset': 'UTF-8'}),
             )
         self.assertEqual(
-            util.parse_meta_refresh(os.path.join(root_dir, 'test_util', 'parse_meta_refresh', 'nonexist.html')),
-            (None, None)
+            util.parse_content_type('TEXT/HTML; CHARSET="UTF-8"'),
+            ('text/html', {'charset': 'UTF-8'}),
+            )
+        self.assertEqual(
+            util.parse_content_type(None),
+            (None, {}),
+            )
+        self.assertEqual(
+            util.parse_content_type(''),
+            (None, {}),
+            )
+
+    def test_parse_datauri(self):
+        self.assertEqual(
+            util.parse_datauri('data:text/plain;base64,QUJDMTIz5Lit5paH'),
+            (b'ABC123\xe4\xb8\xad\xe6\x96\x87', 'text/plain', {})
+            )
+        self.assertEqual(
+            util.parse_datauri('data:text/plain,ABC123%E4%B8%AD%E6%96%87'),
+            (b'ABC123\xe4\xb8\xad\xe6\x96\x87', 'text/plain', {})
+            )
+        self.assertEqual(
+            util.parse_datauri('data:text/plain;filename=ABC%E6%AA%94.md;base64,QUJDMTIz5Lit5paH'),
+            (b'ABC123\xe4\xb8\xad\xe6\x96\x87', 'text/plain', {'filename': 'ABC%E6%AA%94.md'})
+            )
+        self.assertEqual(
+            util.parse_datauri('data:text/plain;filename=ABC%E6%AA%94.md,ABC123%E4%B8%AD%E6%96%87'),
+            (b'ABC123\xe4\xb8\xad\xe6\x96\x87', 'text/plain', {'filename': 'ABC%E6%AA%94.md'})
+            )
+        self.assertEqual(
+            util.parse_datauri('data:text/plain;charset=big5;filename=ABC%E6%AA%94.md;base64,QUJDMTIz5Lit5paH'),
+            (b'ABC123\xe4\xb8\xad\xe6\x96\x87', 'text/plain', {'filename': 'ABC%E6%AA%94.md', 'charset': 'big5'})
+            )
+        self.assertEqual(
+            util.parse_datauri('data:text/plain;charset=big5;filename=ABC%E6%AA%94.md,ABC123%E4%B8%AD%E6%96%87'),
+            (b'ABC123\xe4\xb8\xad\xe6\x96\x87', 'text/plain', {'filename': 'ABC%E6%AA%94.md', 'charset': 'big5'})
+            )
+
+        # missing MIME => empty MIME
+        self.assertEqual(
+            util.parse_datauri('data:,ABC'),
+            (b'ABC', '', {})
+            )
+
+        # non-ASCII data => treat as UTF-8
+        self.assertEqual(
+            util.parse_datauri('data:text/plain,ABC中文'),
+            (b'ABC\xe4\xb8\xad\xe6\x96\x87', 'text/plain', {})
+            )
+
+        # incomplete => raise DataUriMalformedError
+        with self.assertRaises(util.DataUriMalformedError):
+            util.parse_datauri('data:')
+        with self.assertRaises(util.DataUriMalformedError):
+            util.parse_datauri('data:text/html')
+        with self.assertRaises(util.DataUriMalformedError):
+            util.parse_datauri('data:text/html;base64')
+
+        # malformed base64 => raise DataUriMalformedError
+        with self.assertRaises(util.DataUriMalformedError):
+            util.parse_datauri('data:text/plain;base64,ABC')
+
+    def test_get_charset(self):
+        root = os.path.join(root_dir, 'test_util', 'get_charset')
+        self.assertIsNone(util.get_charset(os.path.join(root, 'charset1.html')))
+        self.assertEqual(util.get_charset(os.path.join(root, 'charset2.html')), 'UTF-8')
+        self.assertEqual(util.get_charset(os.path.join(root, 'charset3.html')), 'Big5')
+        self.assertEqual(util.get_charset(os.path.join(root, 'charset4.html')), 'UTF-8')
+        self.assertEqual(util.get_charset(os.path.join(root, 'charset5.html')), 'BIG5')
+
+    def test_iter_meta_refresh(self):
+        root = os.path.join(root_dir, 'test_util', 'iter_meta_refresh')
+        self.assertEqual(
+            list(util.iter_meta_refresh(os.path.join(root, 'refresh1.html'))),
+            [
+                (15, 'target.html', None),
+                (0, None, None),
+                (0, 'target.html', None),
+                (0, 'target2.html', None),
+                ],
+            )
+        self.assertEqual(
+            list(util.iter_meta_refresh(os.path.join(root, 'refresh2.html'))),
+            [
+                (15, 'target.html', None),
+                (0, 'target.html', None),
+                (0, 'target2.html', None),
+                ],
+            )
+        self.assertEqual(
+            list(util.iter_meta_refresh(os.path.join(root, 'refresh3.html'))),
+            [
+                (0, 'target-title.html', ['title']),
+                (0, 'target-iframe.html', ['iframe']),
+                (0, 'target-noframes.html', ['noframes']),
+                (0, 'target-noscript.html', ['noscript']),
+                (0, 'target-noembed.html', ['noembed']),
+                (0, 'target-textarea.html', ['textarea']),
+                (0, 'target-template.html', ['template']),
+                (0, 'target-xmp.html', ['xmp']),
+                ],
+            )
+        self.assertEqual(
+            list(util.iter_meta_refresh(os.path.join(root, 'refresh4.html'))),
+            [(0, 'target.html', ['noscript', 'noframes'])],
+            )
+        self.assertEqual(
+            list(util.iter_meta_refresh(os.path.join(root, 'nonexist.html'))),
+            [],
             )
 
         zip_filename = os.path.join(root_dir, 'test_util', 'zipfile.zip')
@@ -641,10 +1025,50 @@ class TestUtils(unittest.TestCase):
                 zh.writestr('refresh.html', '<meta http-equiv="refresh" content="0;url=target.html">')
 
             with zipfile.ZipFile(zip_filename, 'r') as zh:
-                with zh.open('refresh.html') as f:
+                with zh.open('refresh.html') as fh:
                     self.assertEqual(
-                        util.parse_meta_refresh(f),
-                        (0, 'target.html')
+                        list(util.iter_meta_refresh(fh)),
+                        [(0, 'target.html', None)]
+                        )
+        finally:
+            try:
+                os.remove(zip_filename)
+            except FileNotFoundError:
+                pass
+
+    def test_parse_meta_refresh(self):
+        root = os.path.join(root_dir, 'test_util', 'iter_meta_refresh')
+        self.assertEqual(
+            util.parse_meta_refresh(os.path.join(root, 'refresh1.html')),
+            (0, 'target.html', None)
+            )
+        self.assertEqual(
+            util.parse_meta_refresh(os.path.join(root, 'refresh2.html')),
+            (0, 'target.html', None)
+            )
+        self.assertEqual(
+            util.parse_meta_refresh(os.path.join(root, 'refresh3.html')),
+            (None, None, None)
+            )
+        self.assertEqual(
+            util.parse_meta_refresh(os.path.join(root, 'refresh4.html')),
+            (None, None, None)
+            )
+        self.assertEqual(
+            util.parse_meta_refresh(os.path.join(root, 'nonexist.html')),
+            (None, None, None)
+            )
+
+        zip_filename = os.path.join(root_dir, 'test_util', 'zipfile.zip')
+        try:
+            with zipfile.ZipFile(zip_filename, 'w') as zh:
+                zh.writestr('refresh.html', '<meta http-equiv="refresh" content="0;url=target.html">')
+
+            with zipfile.ZipFile(zip_filename, 'r') as zh:
+                with zh.open('refresh.html') as fh:
+                    self.assertEqual(
+                        util.parse_meta_refresh(fh),
+                        (0, 'target.html', None)
                         )
         finally:
             try:
@@ -735,205 +1159,6 @@ class TestUtils(unittest.TestCase):
         self.assertEqual(util.encrypt('1234', 'salt', 'unknown'),
             '1234salt'
             )
-
-class TestTokenHandler(unittest.TestCase):
-    def setUp(self):
-        self.test_dir = os.path.join(os.path.dirname(__file__), 'test_util', 'token_handler')
-        os.makedirs(self.test_dir, exist_ok=True)
-
-    def tearDown(self):
-        try:
-            shutil.rmtree(self.test_dir)
-        except NotADirectoryError:
-            os.remove(self.test_dir)
-        except FileNotFoundError:
-            pass
-
-    @mock.patch('webscrapbook.util.TokenHandler.check_delete_expire')
-    @mock.patch('webscrapbook.util.TokenHandler.DEFAULT_EXPIRY', 10)
-    def test_acquire1(self, mock_check):
-        now = time.time()
-        expected_expire_time = int(now) + 10
-
-        handler = util.TokenHandler(self.test_dir)
-        token = handler.acquire()
-        token_file = os.path.join(self.test_dir, token)
-
-        self.assertTrue(os.path.isfile(token_file))
-        with open(token_file, 'r', encoding='UTF-8') as f:
-            self.assertAlmostEqual(int(f.read()), expected_expire_time, delta=1)
-        self.assertAlmostEqual(mock_check.call_args[0][0], now, delta=1)
-
-    @mock.patch('webscrapbook.util.TokenHandler.check_delete_expire')
-    @mock.patch('webscrapbook.util.TokenHandler.DEFAULT_EXPIRY', 30)
-    def test_acquire2(self, mock_check):
-        now = 30000
-        expected_expire_time = int(now) + 30
-
-        handler = util.TokenHandler(self.test_dir)
-        token = handler.acquire(now)
-        token_file = os.path.join(self.test_dir, token)
-
-        self.assertTrue(os.path.isfile(token_file))
-        with open(token_file, 'r', encoding='UTF-8') as f:
-            self.assertEqual(int(f.read()), expected_expire_time)
-        self.assertEqual(mock_check.call_args[0][0], now)
-
-    def test_validate1(self):
-        token = 'sampleToken'
-        token_time = int(time.time()) + 3
-
-        token_file = os.path.join(self.test_dir, token)
-        with open(token_file, 'w', encoding='UTF-8') as f:
-            f.write(str(token_time))
-
-        handler = util.TokenHandler(self.test_dir)
-        self.assertTrue(handler.validate(token))
-
-    def test_validate2(self):
-        token = 'sampleToken'
-        token_time = int(time.time()) - 3
-
-        token_file = os.path.join(self.test_dir, token)
-        with open(token_file, 'w', encoding='UTF-8') as f:
-            f.write(str(token_time))
-
-        handler = util.TokenHandler(self.test_dir)
-        self.assertFalse(handler.validate(token))
-
-    def test_validate3(self):
-        token = 'sampleToken'
-        now = 30000
-        token_time = 30001
-
-        token_file = os.path.join(self.test_dir, token)
-        with open(token_file, 'w', encoding='UTF-8') as f:
-            f.write(str(token_time))
-
-        handler = util.TokenHandler(self.test_dir)
-        self.assertTrue(handler.validate(token, now))
-
-    def test_validate4(self):
-        token = 'sampleToken'
-        now = 30000
-        token_time = 29999
-
-        token_file = os.path.join(self.test_dir, token)
-        with open(token_file, 'w', encoding='UTF-8') as f:
-            f.write(str(token_time))
-
-        handler = util.TokenHandler(self.test_dir)
-        self.assertFalse(handler.validate(token, now))
-
-    def test_delete(self):
-        token = 'sampleToken'
-
-        token_file = os.path.join(self.test_dir, token)
-        with open(token_file, 'w', encoding='UTF-8') as f:
-            f.write(str(32768))
-
-        handler = util.TokenHandler(self.test_dir)
-        handler.delete(token)
-        self.assertFalse(os.path.exists(token_file))
-
-    def test_delete_expire1(self):
-        now = int(time.time())
-
-        with open(os.path.join(self.test_dir, 'sampleToken1'), 'w', encoding='UTF-8') as f:
-            f.write(str(now - 100))
-        with open(os.path.join(self.test_dir, 'sampleToken2'), 'w', encoding='UTF-8') as f:
-            f.write(str(now - 10))
-        with open(os.path.join(self.test_dir, 'sampleToken3'), 'w', encoding='UTF-8') as f:
-            f.write(str(now + 10))
-        with open(os.path.join(self.test_dir, 'sampleToken4'), 'w', encoding='UTF-8') as f:
-            f.write(str(now + 100))
-
-        handler = util.TokenHandler(self.test_dir)
-        handler.delete_expire()
-
-        self.assertFalse(os.path.exists(os.path.join(self.test_dir, 'sampleToken1')))
-        self.assertFalse(os.path.exists(os.path.join(self.test_dir, 'sampleToken2')))
-        self.assertTrue(os.path.exists(os.path.join(self.test_dir, 'sampleToken3')))
-        self.assertTrue(os.path.exists(os.path.join(self.test_dir, 'sampleToken4')))
-
-    def test_delete_expire2(self):
-        now = 30000
-
-        with open(os.path.join(self.test_dir, 'sampleToken1'), 'w', encoding='UTF-8') as f:
-            f.write(str(29000))
-        with open(os.path.join(self.test_dir, 'sampleToken2'), 'w', encoding='UTF-8') as f:
-            f.write(str(29100))
-        with open(os.path.join(self.test_dir, 'sampleToken3'), 'w', encoding='UTF-8') as f:
-            f.write(str(30100))
-        with open(os.path.join(self.test_dir, 'sampleToken4'), 'w', encoding='UTF-8') as f:
-            f.write(str(30500))
-
-        handler = util.TokenHandler(self.test_dir)
-        handler.delete_expire(now)
-
-        self.assertFalse(os.path.exists(os.path.join(self.test_dir, 'sampleToken1')))
-        self.assertFalse(os.path.exists(os.path.join(self.test_dir, 'sampleToken2')))
-        self.assertTrue(os.path.exists(os.path.join(self.test_dir, 'sampleToken3')))
-        self.assertTrue(os.path.exists(os.path.join(self.test_dir, 'sampleToken4')))
-
-    @mock.patch('webscrapbook.util.TokenHandler.delete_expire')
-    def test_check_delete_expire1(self, mock_delete):
-        now = int(time.time())
-
-        handler = util.TokenHandler(self.test_dir)
-        self.assertEqual(handler.last_purge, 0)
-
-        handler.check_delete_expire()
-        self.assertAlmostEqual(mock_delete.call_args[0][0], now, delta=1)
-        self.assertAlmostEqual(handler.last_purge, now, delta=1)
-
-    @mock.patch('webscrapbook.util.TokenHandler.delete_expire')
-    @mock.patch('webscrapbook.util.TokenHandler.PURGE_INTERVAL', 1000)
-    def test_check_delete_expire2(self, mock_delete):
-        now = int(time.time())
-
-        handler = util.TokenHandler(self.test_dir)
-        handler.last_purge = now - 1100
-
-        handler.check_delete_expire()
-        self.assertAlmostEqual(mock_delete.call_args[0][0], now, delta=1)
-        self.assertAlmostEqual(handler.last_purge, now, delta=1)
-
-    @mock.patch('webscrapbook.util.TokenHandler.delete_expire')
-    @mock.patch('webscrapbook.util.TokenHandler.PURGE_INTERVAL', 1000)
-    def test_check_delete_expire3(self, mock_delete):
-        now = int(time.time())
-
-        handler = util.TokenHandler(self.test_dir)
-        handler.last_purge = now - 900
-
-        handler.check_delete_expire()
-        mock_delete.assert_not_called()
-        self.assertEqual(handler.last_purge, now - 900)
-
-    @mock.patch('webscrapbook.util.TokenHandler.delete_expire')
-    @mock.patch('webscrapbook.util.TokenHandler.PURGE_INTERVAL', 1000)
-    def test_check_delete_expire4(self, mock_delete):
-        now = 40000
-
-        handler = util.TokenHandler(self.test_dir)
-        handler.last_purge = now - 1100
-
-        handler.check_delete_expire(now)
-        self.assertAlmostEqual(mock_delete.call_args[0][0], now, delta=1)
-        self.assertAlmostEqual(handler.last_purge, now, delta=1)
-
-    @mock.patch('webscrapbook.util.TokenHandler.delete_expire')
-    @mock.patch('webscrapbook.util.TokenHandler.PURGE_INTERVAL', 1000)
-    def test_check_delete_expire5(self, mock_delete):
-        now = 40000
-
-        handler = util.TokenHandler(self.test_dir)
-        handler.last_purge = now - 900
-
-        handler.check_delete_expire(now)
-        mock_delete.assert_not_called()
-        self.assertEqual(handler.last_purge, now - 900)
 
 if __name__ == '__main__':
     unittest.main()

@@ -9,24 +9,27 @@ import shutil
 from base64 import b64encode
 from functools import partial
 from flask import request
-from webscrapbook import WSB_DIR, WSB_LOCAL_CONFIG
-from webscrapbook.app import make_app, action_handler
+from webscrapbook import WSB_DIR, WSB_CONFIG
+from webscrapbook import app as wsbapp
+from webscrapbook.app import make_app
 
 root_dir = os.path.abspath(os.path.dirname(__file__))
 server_root = os.path.join(root_dir, 'test_app_config')
-server_config = os.path.join(server_root, WSB_DIR, WSB_LOCAL_CONFIG)
-
-all_actions = [attr for attr in dir(action_handler) if not attr.startswith('_')]
-mocking = None
+server_config = os.path.join(server_root, WSB_DIR, WSB_CONFIG)
 
 def setUpModule():
     # create temp folders
     os.makedirs(os.path.dirname(server_config), exist_ok=True)
 
-    # mock out WSB_USER_CONFIG
-    global mocking
-    mocking = mock.patch('webscrapbook.WSB_USER_CONFIG', server_root)
-    mocking.start()
+    # mock out user config
+    global mockings
+    mockings = [
+        mock.patch('webscrapbook.WSB_USER_DIR', os.path.join(server_root, 'wsb')),
+        mock.patch('webscrapbook.scrapbook.host.WSB_USER_DIR', os.path.join(server_root, 'wsb')),
+        mock.patch('webscrapbook.WSB_USER_CONFIG', server_root),
+        ]
+    for mocking in mockings:
+        mocking.start()
 
 def tearDownModule():
     # purge WSB_DIR
@@ -36,7 +39,8 @@ def tearDownModule():
         pass
 
     # stop mock
-    mocking.stop()
+    for mocking in mockings:
+        mocking.stop()
 
 def token(get):
     """Wrapper to quickly retrieve a token."""
@@ -57,12 +61,12 @@ name = mywsb
             # /
             r = get('/')
             html = r.data.decode('UTF-8')
-            self.assertTrue('<h1 id="header" class="breadcrumbs"><a>mywsb</a>/</h1>' in html)
+            self.assertIn('<h1 id="header" class="breadcrumbs"><a>mywsb</a>/</h1>', html)
 
             # /subdir/
             r = get('/subdir/')
             html = r.data.decode('UTF-8')
-            self.assertTrue('<h1 id="header" class="breadcrumbs"><a href="/">mywsb</a>/<a>subdir</a>/</h1>' in html)
+            self.assertIn('<h1 id="header" class="breadcrumbs"><a href="/">mywsb</a>/<a>subdir</a>/</h1>', html)
 
     def test_name2(self):
         """app.name should be used as auth realm"""
@@ -100,6 +104,9 @@ theme = default
             os.path.normcase(os.path.join(server_root, WSB_DIR, 'themes', 'default', 'templates')))
         self.assertEqual(
             os.path.normcase(mock_loader.call_args[0][0][1]),
+            os.path.normcase(os.path.abspath(os.path.join(server_root, 'wsb',  'themes', 'default', 'templates'))))
+        self.assertEqual(
+            os.path.normcase(mock_loader.call_args[0][0][2]),
             os.path.normcase(os.path.abspath(os.path.join(__file__, '..', '..', 'webscrapbook',  'themes', 'default', 'templates'))))
 
     def test_root(self):
@@ -135,7 +142,7 @@ root = subdir
                 'f': 'json',
                 'name': 'test',
                 })
-            self.assertTrue(os.path.lexists(os.path.join(server_root, WSB_DIR, 'server', 'locks', '098f6bcd4621d373cade4e832627b4f6.lock')))
+            self.assertTrue(os.path.lexists(os.path.join(server_root, WSB_DIR, 'locks', '098f6bcd4621d373cade4e832627b4f6.lock')))
 
     def test_base(self):
         # base = / (no base)
@@ -153,13 +160,13 @@ base =
             r = get('/')
             html = r.data.decode('UTF-8')
 
-            self.assertTrue('href="/common.css?a=static"' in html)
-            self.assertTrue('href="/index.css?a=static"' in html)
-            self.assertTrue('src="/common.js?a=static"' in html)
-            self.assertTrue('src="/index.js?a=static"' in html)
+            self.assertIn('href="/common.css?a=static"', html)
+            self.assertIn('href="/index.css?a=static"', html)
+            self.assertIn('src="/common.js?a=static"', html)
+            self.assertIn('src="/index.js?a=static"', html)
 
-            self.assertTrue('<h1 id="header" class="breadcrumbs"><a>WebScrapBook</a>/</h1>' in html)
-            self.assertTrue('data-base="" data-path="/"' in html)
+            self.assertIn('<h1 id="header" class="breadcrumbs"><a>WebScrapBook</a>/</h1>', html)
+            self.assertIn('data-base="" data-path="/"', html)
 
 
             # /subdir/
@@ -171,13 +178,13 @@ base =
             r = get('/subdir/')
             html = r.data.decode('UTF-8')
 
-            self.assertTrue('href="/common.css?a=static"' in html)
-            self.assertTrue('href="/index.css?a=static"' in html)
-            self.assertTrue('src="/common.js?a=static"' in html)
-            self.assertTrue('src="/index.js?a=static"' in html)
+            self.assertIn('href="/common.css?a=static"', html)
+            self.assertIn('href="/index.css?a=static"', html)
+            self.assertIn('src="/common.js?a=static"', html)
+            self.assertIn('src="/index.js?a=static"', html)
 
-            self.assertTrue('<h1 id="header" class="breadcrumbs"><a href="/">WebScrapBook</a>/<a>subdir</a>/</h1>' in html)
-            self.assertTrue('data-base="" data-path="/subdir/"' in html)
+            self.assertIn('<h1 id="header" class="breadcrumbs"><a href="/">WebScrapBook</a>/<a>subdir</a>/</h1>', html)
+            self.assertIn('data-base="" data-path="/subdir/"', html)
 
         # base = /scrap%20%E6%9B%B8
         with open(server_config, 'w', encoding='UTF-8') as f:
@@ -194,13 +201,13 @@ base = /scrap%20%E6%9B%B8
             r = get('/')
             html = r.data.decode('UTF-8')
 
-            self.assertTrue('href="/scrap%20%E6%9B%B8/common.css?a=static"' in html)
-            self.assertTrue('href="/scrap%20%E6%9B%B8/index.css?a=static"' in html)
-            self.assertTrue('src="/scrap%20%E6%9B%B8/common.js?a=static"' in html)
-            self.assertTrue('src="/scrap%20%E6%9B%B8/index.js?a=static"' in html)
+            self.assertIn('href="/scrap%20%E6%9B%B8/common.css?a=static"', html)
+            self.assertIn('href="/scrap%20%E6%9B%B8/index.css?a=static"', html)
+            self.assertIn('src="/scrap%20%E6%9B%B8/common.js?a=static"', html)
+            self.assertIn('src="/scrap%20%E6%9B%B8/index.js?a=static"', html)
 
-            self.assertTrue('<h1 id="header" class="breadcrumbs"><a>WebScrapBook</a>/</h1>' in html)
-            self.assertTrue('data-base="/scrap 書" data-path="/"' in html)
+            self.assertIn('<h1 id="header" class="breadcrumbs"><a>WebScrapBook</a>/</h1>', html)
+            self.assertIn('data-base="/scrap 書" data-path="/"', html)
 
             # /subdir/
             r = get('/subdir')
@@ -211,13 +218,13 @@ base = /scrap%20%E6%9B%B8
             r = get('/subdir/')
             html = r.data.decode('UTF-8')
 
-            self.assertTrue('href="/scrap%20%E6%9B%B8/common.css?a=static"' in html)
-            self.assertTrue('href="/scrap%20%E6%9B%B8/index.css?a=static"' in html)
-            self.assertTrue('src="/scrap%20%E6%9B%B8/common.js?a=static"' in html)
-            self.assertTrue('src="/scrap%20%E6%9B%B8/index.js?a=static"' in html)
+            self.assertIn('href="/scrap%20%E6%9B%B8/common.css?a=static"', html)
+            self.assertIn('href="/scrap%20%E6%9B%B8/index.css?a=static"', html)
+            self.assertIn('src="/scrap%20%E6%9B%B8/common.js?a=static"', html)
+            self.assertIn('src="/scrap%20%E6%9B%B8/index.js?a=static"', html)
 
-            self.assertTrue('<h1 id="header" class="breadcrumbs"><a href="/scrap%20%E6%9B%B8/">WebScrapBook</a>/<a>subdir</a>/</h1>' in html)
-            self.assertTrue('data-base="/scrap 書" data-path="/subdir/"' in html)
+            self.assertIn('<h1 id="header" class="breadcrumbs"><a href="/scrap%20%E6%9B%B8/">WebScrapBook</a>/<a>subdir</a>/</h1>', html)
+            self.assertIn('data-base="/scrap 書" data-path="/subdir/"', html)
 
     def test_x_prefix(self):
         # allowed_x_prefix = 0
@@ -237,13 +244,13 @@ allowed_x_prefix = 0
             r = get('/')
             html = r.data.decode('UTF-8')
 
-            self.assertTrue('href="/common.css?a=static"' in html)
-            self.assertTrue('href="/index.css?a=static"' in html)
-            self.assertTrue('src="/common.js?a=static"' in html)
-            self.assertTrue('src="/index.js?a=static"' in html)
+            self.assertIn('href="/common.css?a=static"', html)
+            self.assertIn('href="/index.css?a=static"', html)
+            self.assertIn('src="/common.js?a=static"', html)
+            self.assertIn('src="/index.js?a=static"', html)
 
-            self.assertTrue('<h1 id="header" class="breadcrumbs"><a>WebScrapBook</a>/</h1>' in html)
-            self.assertTrue('data-base="" data-path="/"' in html)
+            self.assertIn('<h1 id="header" class="breadcrumbs"><a>WebScrapBook</a>/</h1>', html)
+            self.assertIn('data-base="" data-path="/"', html)
 
             # /subdir/
             r = get('/subdir')
@@ -254,13 +261,13 @@ allowed_x_prefix = 0
             r = get('/subdir/')
             html = r.data.decode('UTF-8')
 
-            self.assertTrue('href="/common.css?a=static"' in html)
-            self.assertTrue('href="/index.css?a=static"' in html)
-            self.assertTrue('src="/common.js?a=static"' in html)
-            self.assertTrue('src="/index.js?a=static"' in html)
+            self.assertIn('href="/common.css?a=static"', html)
+            self.assertIn('href="/index.css?a=static"', html)
+            self.assertIn('src="/common.js?a=static"', html)
+            self.assertIn('src="/index.js?a=static"', html)
 
-            self.assertTrue('<h1 id="header" class="breadcrumbs"><a href="/">WebScrapBook</a>/<a>subdir</a>/</h1>' in html)
-            self.assertTrue('data-base="" data-path="/subdir/"' in html)
+            self.assertIn('<h1 id="header" class="breadcrumbs"><a href="/">WebScrapBook</a>/<a>subdir</a>/</h1>', html)
+            self.assertIn('data-base="" data-path="/subdir/"', html)
 
         # allowed_x_prefix = 1
         with open(server_config, 'w', encoding='UTF-8') as f:
@@ -279,13 +286,13 @@ allowed_x_prefix = 1
             r = get('/')
             html = r.data.decode('UTF-8')
 
-            self.assertTrue('href="/scrap%20%E6%9B%B8/common.css?a=static"' in html)
-            self.assertTrue('href="/scrap%20%E6%9B%B8/index.css?a=static"' in html)
-            self.assertTrue('src="/scrap%20%E6%9B%B8/common.js?a=static"' in html)
-            self.assertTrue('src="/scrap%20%E6%9B%B8/index.js?a=static"' in html)
+            self.assertIn('href="/scrap%20%E6%9B%B8/common.css?a=static"', html)
+            self.assertIn('href="/scrap%20%E6%9B%B8/index.css?a=static"', html)
+            self.assertIn('src="/scrap%20%E6%9B%B8/common.js?a=static"', html)
+            self.assertIn('src="/scrap%20%E6%9B%B8/index.js?a=static"', html)
 
-            self.assertTrue('<h1 id="header" class="breadcrumbs"><a>WebScrapBook</a>/</h1>' in html)
-            self.assertTrue('data-base="/scrap 書" data-path="/"' in html)
+            self.assertIn('<h1 id="header" class="breadcrumbs"><a>WebScrapBook</a>/</h1>', html)
+            self.assertIn('data-base="/scrap 書" data-path="/"', html)
 
             # /subdir/
             r = get('/subdir')
@@ -296,13 +303,13 @@ allowed_x_prefix = 1
             r = get('/subdir/')
             html = r.data.decode('UTF-8')
 
-            self.assertTrue('href="/scrap%20%E6%9B%B8/common.css?a=static"' in html)
-            self.assertTrue('href="/scrap%20%E6%9B%B8/index.css?a=static"' in html)
-            self.assertTrue('src="/scrap%20%E6%9B%B8/common.js?a=static"' in html)
-            self.assertTrue('src="/scrap%20%E6%9B%B8/index.js?a=static"' in html)
+            self.assertIn('href="/scrap%20%E6%9B%B8/common.css?a=static"', html)
+            self.assertIn('href="/scrap%20%E6%9B%B8/index.css?a=static"', html)
+            self.assertIn('src="/scrap%20%E6%9B%B8/common.js?a=static"', html)
+            self.assertIn('src="/scrap%20%E6%9B%B8/index.js?a=static"', html)
 
-            self.assertTrue('<h1 id="header" class="breadcrumbs"><a href="/scrap%20%E6%9B%B8/">WebScrapBook</a>/<a>subdir</a>/</h1>' in html)
-            self.assertTrue('data-base="/scrap 書" data-path="/subdir/"' in html)
+            self.assertIn('<h1 id="header" class="breadcrumbs"><a href="/scrap%20%E6%9B%B8/">WebScrapBook</a>/<a>subdir</a>/</h1>', html)
+            self.assertIn('data-base="/scrap 書" data-path="/subdir/"', html)
 
     def test_x_host(self):
         # x_.. = 0
@@ -512,9 +519,8 @@ class TestAuth(unittest.TestCase):
             with self.assertRaises(KeyError):
                 response.headers['WWW-Authenticate']
 
-    @mock.patch('webscrapbook.app.ActionHandler._handle_action', return_value='')
-    @mock.patch('webscrapbook.app.get_permission')
-    def test_get_permission(self, mock_perm, *_):
+    @mock.patch('webscrapbook.app.get_permission', return_value='')
+    def test_get_permission(self, mock_perm):
         """Check if HTTP authorization info is passed to get_permission()."""
         with open(server_config, 'w', encoding='UTF-8') as f:
             f.write("""\
@@ -544,10 +550,10 @@ permission = view
                         c.open('/', method=method, headers=headers)
                         self.assertEqual(mock_perm.call_args[0][0], expected)
 
-    @mock.patch('webscrapbook.app.ActionHandler._handle_action', return_value='')
-    @mock.patch('webscrapbook.app.verify_authorization')
-    def test_verify_authorization(self, mock_auth, *_):
+    @mock.patch('webscrapbook.app.verify_authorization', return_value=False)
+    def test_verify_authorization(self, mock_auth):
         """Check if action is passed to verify_authorization()."""
+        all_actions = (fn[7:] for fn in dir(wsbapp) if fn.startswith('action_'))
         app = make_app(server_root)
         app.testing = True
         with app.test_client() as c:

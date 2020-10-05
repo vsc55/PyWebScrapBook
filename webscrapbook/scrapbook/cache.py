@@ -1,0 +1,980 @@
+"""Generator of fulltext cache and/or static site pages.
+"""
+import os
+import traceback
+import shutil
+import io
+import zipfile
+import mimetypes
+import time
+import re
+import html
+import copy
+import itertools
+import functools
+from collections import namedtuple, UserDict
+from urllib.parse import urlsplit, urljoin, quote, unquote
+from datetime import datetime, timezone
+
+import jinja2
+from lxml import etree
+
+from .host import Host
+from .. import util
+from ..util import Info
+from ..locales import I18N
+from .._compat import zip_stream
+from .._compat.contextlib import nullcontext
+
+
+class MutatingDict(UserDict):
+    """Support adding during dict iteration.
+    """
+    def __init__(self, *args, **kwargs):
+        self._keys = []
+
+        # this calls __setitem__ internally
+        super().__init__(*args, **kwargs)
+
+    def __setitem__(self, key, value):
+        if key not in self:
+            self._keys.append(key)
+        super().__setitem__(key, value)
+
+    def __iter__(self):
+        return iter(self._keys)
+
+    def __delitem__(self, key):
+        return NotImplemented
+
+
+class StaticSiteGenerator():
+    """Main class for static site pages generation.
+    """
+    RESOURCES = {
+        'icon/toggle.png': 'toggle.png',
+        'icon/search.png': 'search.png',
+        'icon/collapse.png': 'collapse.png',
+        'icon/expand.png': 'expand.png',
+        'icon/external.png': 'external.png',
+        'icon/item.png': 'item.png',
+        'icon/fclose.png': 'fclose.png',
+        'icon/fopen.png': 'fopen.png',
+        'icon/file.png': 'file.png',
+        'icon/note.png': 'note.png',  # ScrapBook X notex
+        'icon/postit.png': 'postit.png',  # ScrapBook X note
+        }
+    ITEM_TYPE_ICON = {
+        'folder': 'icon/fclose.png',
+        'file': 'icon/file.png',
+        'note': 'icon/note.png',
+        'postit': 'icon/postit.png',
+        }
+
+    def __init__(self, book, *, locale=None,
+            static_index=False, rss=False,
+            ):
+        self.host = book.host
+        self.book = book
+        self.static_index = static_index
+        self.i18n = I18N(locale)
+
+        self.rss = rss
+
+        self.template_env = jinja2.Environment(
+            loader=jinja2.FileSystemLoader(self.host.templates),
+            autoescape=jinja2.select_autoescape(['html']),
+            )
+
+        book.load_meta_files()
+        book.load_toc_files()
+
+    def run(self):
+        yield Info('info', 'Generating static site pages...')
+
+        # copy resource files
+        for dst, src in self.RESOURCES.items():
+            yield from self._generate_resource_file(src, dst)
+
+        # generate static site pages
+        index_kwargs = dict(
+            title=self.book.name, i18n = self.i18n,
+            rss=self.rss,
+            data_dir = util.get_relative_url(self.book.data_dir, self.book.tree_dir),
+            meta_cnt=max(sum(1 for _ in self.book.iter_meta_files()), 1),
+            toc_cnt=max(sum(1 for _ in self.book.iter_toc_files()), 1),
+            )
+
+        if self.static_index:
+            yield from self._generate_page('index.html', 'static_map.html', filename='index',
+                static_index=self._generate_static_index(), **index_kwargs,
+                )
+
+        yield from self._generate_page('map.html', 'static_map.html', filename='map',
+            static_index=None, **index_kwargs,
+            )
+
+        yield from self._generate_page('frame.html', 'static_frame.html',
+            title=self.book.name, i18n = self.i18n,
+            )
+
+        yield from self._generate_page('search.html', 'static_search.html',
+            title=self.book.name, i18n = self.i18n,
+            path=util.get_relative_url(self.book.top_dir, self.book.tree_dir),
+            data_dir=util.get_relative_url(self.book.data_dir, self.book.top_dir),
+            tree_dir=util.get_relative_url(self.book.tree_dir, self.book.top_dir),
+            index=self.host.config['book'][self.book.id]['index'],
+            )
+
+    def _generate_resource_file(self, src, dst):
+        yield Info('debug', f'Checking resource file "{dst}"')
+        fsrc = self.host.get_static_file(src)
+        fdst = os.path.normpath(os.path.join(self.book.tree_dir, dst))
+
+        # check whether writing is required
+        if os.path.isfile(fdst):
+            if os.stat(fsrc).st_size == os.stat(fdst).st_size:
+                if util.checksum(fsrc) == util.checksum(fdst):
+                    yield Info('debug', f'Skipped resource file "{dst}" (up-to-date)')
+                    return
+
+        # save file
+        yield Info('info', f'Generating resource file "{dst}"')
+        try:
+            os.makedirs(os.path.dirname(fdst), exist_ok=True)
+            fsrc = self.host.get_static_file(src)
+            self.book.backup(fdst)
+            shutil.copyfile(fsrc, fdst)
+        except OSError as exc:
+            yield Info('error', f'Failed to create resource file "{dst}": [Errno {exc.args[0]}] {exc.args[1]}', exc=exc)
+
+    def _generate_page(self, dst, tpl, **kwargs):
+        yield Info('debug', f'Checking page "{dst}"')
+        fsrc = io.BytesIO()
+        fdst = os.path.normpath(os.path.join(self.book.tree_dir, dst))
+
+        template = self.template_env.get_template(tpl)
+        content = template.render(**kwargs)
+        fsrc.write(content.encode('UTF-8'))
+
+        # check whether writing is required
+        if os.path.isfile(fdst):
+            if fsrc.getbuffer().nbytes == os.stat(fdst).st_size:
+                fsrc.seek(0)
+                if util.checksum(fsrc) == util.checksum(fdst):
+                    yield Info('debug', f'Skipped page "{dst}" (up-to-date)')
+                    return
+
+        # save file
+        yield Info('info', f'Generating page "{dst}"')
+        try:
+            fsrc.seek(0)
+            os.makedirs(os.path.dirname(fdst), exist_ok=True)
+            self.book.backup(fdst)
+            with open(fdst, 'wb') as fh:
+                shutil.copyfileobj(fsrc, fh)
+        except OSError as exc:
+            yield Info('error', f'Failed to create page file "{dst}": [Errno {exc.args[0]}] {exc.args[1]}', exc=exc)
+
+    def _generate_static_index(self):
+        def get_class_text(classes, prefix=' '):
+            if not classes:
+                return ''
+
+            c = html.escape(' '.join(classes))
+            return f'{prefix}class="{c}"'
+
+        def add_child_items(parent_id):
+            nonlocal indent
+
+            try:
+                toc = book.toc[parent_id]
+            except KeyError:
+                return
+
+            toc = [id for id in toc if id in book.meta and id not in item_set]
+            if not toc:
+                return
+
+            yield f'{" " * indent}<ul class="scrapbook-container">\n'
+            indent += 2
+
+            for id in toc:
+                meta = book.meta[id]
+                meta_type = meta.get('type', '')
+                meta_index = meta.get('index', '')
+                meta_title = meta.get('title', '')
+                meta_source = meta.get('source', '')
+                meta_icon = meta.get('icon', '')
+                meta_marked = meta.get('marked', '')
+
+                classes = []
+                if meta_type:
+                    classes.append(f'scrapbook-type-{meta_type}')
+                if meta_marked:
+                    classes.append('scrapbook-marked')
+
+                yield f'{" " * indent}<li id="item-{html.escape(id)}"{get_class_text(classes)}>\n'
+                indent += 2
+
+                item_set.add(id)
+
+                if meta_type != 'separator':
+                    title = html.escape(meta_title or id)
+
+                    if meta_type != 'folder':
+                        if meta_type == 'bookmark' and meta_source:
+                            href = meta_source
+                        elif meta_index:
+                            href = util.get_relative_url(os.path.join(book.data_dir, meta_index), book.tree_dir, path_is_dir=False)
+                        else:
+                            href = ''
+                    else:
+                        href = ''
+
+                    if href:
+                        href = f' href="{html.escape(href)}"'
+
+                    # meta_icon is a URL
+                    if meta_icon:
+                        if urlsplit(meta_icon).scheme:
+                            # absolute URL
+                            icon = meta_icon
+                        else:
+                            # relative URL: tree_dir..index..icon
+                            ref = util.get_relative_url(os.path.join(book.data_dir, os.path.dirname(meta_index)), book.tree_dir)
+                            icon = ref + meta_icon
+                    else:
+                        icon = self.ITEM_TYPE_ICON.get(meta_type, 'icon/item.png')
+                    icon = html.escape(icon)
+
+                    yield f'{" " * indent}<div><a{href}><img src="{icon}" alt="">{title}</a></div>\n'
+                else:
+                    title = html.escape(meta_title)
+                    yield f'{" " * indent}<div><fieldset><legend>&nbsp;{title}&nbsp;</legend></fieldset></div>\n'
+
+                yield from add_child_items(id)
+
+                indent -= 2
+                yield f'{" " * indent}</li>\n'
+
+            indent -= 2
+            yield f'{" " * indent}</ul>\n'
+
+        book = self.book
+
+        item_set = {'root', 'hidden', 'recycle'}
+        indent = 0
+
+        yield '<div id="item-root">\n'
+        yield from add_child_items('root')
+        yield '</div>\n'
+
+
+class RssFeedGenerator():
+    """Main class for RSS feed generation.
+    """
+    NS = 'http://www.w3.org/2005/Atom'
+
+    def __init__(self, book, *, rss_root=None):
+        self.book = book
+        self.rss_root = rss_root.rstrip('/') + '/'
+
+        book.load_meta_files()
+        book.load_toc_files()
+
+    def run(self):
+        yield Info('info', 'Generating RSS feed...')
+
+        book = self.book
+        rss_root = self.rss_root
+
+        # RSS root must be an absolute URL
+        u = urlsplit(rss_root)
+        if not (u.scheme and u.netloc):
+            yield Info('error', f'Invalid RSS root URL "{rss_root}"')
+            return
+
+        id_prefix = re.sub(r'/+$', '', f'urn:webscrapbook:{u.netloc}{u.path}')
+        data_url = urljoin(rss_root, util.get_relative_url(book.data_dir, book.root))
+        tree_url = urljoin(rss_root, util.get_relative_url(book.tree_dir, book.root))
+
+        # get latest updated item entries
+        entries = []
+        for id, meta in book.meta.items():
+            # show only items with content,
+            # either with index or a bookmark with source
+            if meta.get('type') in {'folder', 'separator'}:
+                continue
+
+            if meta.get('type') != 'bookmark' and meta.get('index'):
+                pass
+            elif meta.get('type') == 'bookmark' and meta.get('source'):
+                pass
+            else:
+                continue
+
+            entries.append({
+                'id': id,
+                'modify': meta.get('modify', meta.get('create', '')),
+                'item': meta,
+                })
+        entries = sorted(entries, key=lambda d: d['modify'])
+        entries = list(reversed(entries))[:50]
+
+        # generate tree
+        root = etree.XML(f'<feed xmlns="{self.NS}"></feed>'.encode('UTF-8'))
+
+        elem = etree.SubElement(root, 'id')
+        elem.text = id_prefix
+
+        elem = etree.SubElement(root, 'link')
+        elem.attrib['rel'] = 'self'
+        elem.attrib['href'] = urljoin(tree_url, 'feed.atom')
+
+        elem = etree.SubElement(root, 'link')
+        elem.attrib['href'] = urljoin(tree_url, 'map.html')
+
+        elem = etree.SubElement(root, 'title')
+        elem.attrib['type'] = 'text'
+        elem.text = book.name
+
+        elem = etree.SubElement(root, 'updated')
+        if entries:
+            dt = util.id_to_datetime(entries[0]['modify'])
+        else:
+            dt = datetime.now(timezone.utc)
+        elem.text = dt.strftime('%Y-%m-%dT%H:%M:%SZ')
+
+        for entry in entries:
+            entry_elem = etree.SubElement(root, 'entry')
+
+            elem = etree.SubElement(entry_elem, 'id')
+            elem.text = f'{id_prefix}:{quote(entry["id"])}'
+
+            elem = etree.SubElement(entry_elem, 'link')
+            if entry['item'].get('type') == 'bookmark':
+                elem.attrib['href'] = entry['item']['source']
+            else:
+                elem.attrib['href'] = urljoin(data_url, quote(entry['item']['index']))
+
+            elem = etree.SubElement(entry_elem, 'title')
+            elem.attrib['type'] = 'text'
+            elem.text = entry['item'].get('title', '')
+
+            elem = etree.SubElement(entry_elem, 'published')
+            dt = util.id_to_datetime(entry['item'].get('create', '')) or datetime.fromtimestamp(0, timezone.utc)
+            elem.text = dt.strftime('%Y-%m-%dT%H:%M:%SZ')
+
+            elem = etree.SubElement(entry_elem, 'updated')
+            dt = util.id_to_datetime(entry['modify']) or datetime.fromtimestamp(0, timezone.utc)
+            elem.text = dt.strftime('%Y-%m-%dT%H:%M:%SZ')
+
+            elem = etree.SubElement(entry_elem, 'author')
+            elem = etree.SubElement(elem, 'name')
+            elem.text = 'Anonymous'
+
+        # check whether writing is required
+        fsrc = io.BytesIO(etree.tostring(root, xml_declaration=True, encoding='UTF-8'))
+        fdst = os.path.normpath(os.path.join(self.book.tree_dir, 'feed.atom'))
+
+        if os.path.isfile(fdst):
+            if fsrc.getbuffer().nbytes == os.stat(fdst).st_size:
+                fsrc.seek(0)
+                if util.checksum(fsrc) == util.checksum(fdst):
+                    yield Info('debug', 'Skipped RSS feed (up-to-date)')
+                    return
+
+        # save file
+        yield Info('info', 'Generating RSS feed file "feed.atom"')
+        try:
+            fsrc.seek(0)
+            os.makedirs(os.path.dirname(fdst), exist_ok=True)
+            self.book.backup(fdst)
+            with open(fdst, 'wb') as fh:
+                shutil.copyfileobj(fsrc, fh)
+        except OSError as exc:
+            yield Info('error', f'Failed to create RSS feed file "feed.atom": [Errno {exc.args[0]}] {exc.args[1]}', exc=exc)
+
+
+FulltextCacheItem = namedtuple('FulltextCacheItem', ['id', 'meta', 'index', 'indexfile', 'files_to_update'])
+
+class FulltextCacheGenerator():
+    """Main class for fulltext cache generation.
+    """
+    FULLTEXT_SPACE_REPLACER = functools.partial(re.compile(r'\s+').sub, ' ')
+    FULLTEXT_EXCLUDE_TAGS = {
+        'title', 'style', 'script',
+        'frame', 'iframe',
+        'object', 'applet',
+        'audio', 'video',
+        'canvas',
+        'noframes', 'noscript', 'noembed',
+        # 'parsererror',
+        'svg', 'math',
+        }
+    URL_SAMPLE_LENGTH = 256
+
+    def __init__(self, book, *, inclusive_frames=True, recreate=False):
+        self.book = book
+        self.inclusive_frames = inclusive_frames
+        self.recreate = recreate
+        self.cache_last_modified = 0
+
+    def run(self, item_ids=None):
+        """Update fulltext cache for item_ids
+
+        Args:
+            item_ids: a list of item IDs to update, invalid ones will be
+                skipped. None to update all IDs.
+        """
+        yield Info('info', 'Generating fulltext cache...')
+
+        book = self.book
+
+        try:
+            self.cache_last_modified = max(os.stat(f).st_mtime for f in book.iter_fulltext_files())
+        except ValueError:
+            # no fulltext file
+            self.cache_last_modified = 0
+
+        book.load_meta_files()
+        book.load_toc_files()
+        if self.recreate:
+            book.fulltext = {}
+            book_fulltext_orig = None
+        else:
+            book.load_fulltext_files()
+            book_fulltext_orig = copy.deepcopy(book.fulltext)
+
+        # generate cache for each item
+        if item_ids:
+            id_pool = dict.fromkeys(id for id in item_ids if id in book.meta or id in book.fulltext)
+        else:
+            id_pool = dict.fromkeys(itertools.chain(book.meta, book.fulltext))
+
+        for id in id_pool:
+            yield from self._cache_item(id)
+
+        # update fulltext files
+        if book.fulltext != book_fulltext_orig:
+            # changed => save new files
+            yield Info('info', f'Saving fulltext files...')
+            book.save_fulltext_files()
+        else:
+            # no change => touch files to prevent falsely detected as outdated
+            yield Info('info', f'Touching fulltext files...')
+            for file in book.iter_fulltext_files():
+                os.utime(file)
+
+    def _cache_item(self, id):
+        yield Info('debug', f'Checking item "{id}"')
+        book = self.book
+
+        # remove id if no meta
+        meta = book.meta.get(id)
+        if meta is None:
+            yield Info('debug', f'Purging item "{id}" (missing metadata)')
+            yield from self._delete_item(id)
+            return
+
+        # remove id if no index
+        index = meta.get('index')
+        if not index:
+            yield Info('debug', f'Purging item "{id}" (no index)')
+            yield from self._delete_item(id)
+            return
+
+        # remove id if no index file
+        indexfile = os.path.join(book.data_dir, index)
+        if not os.path.exists(indexfile):
+            yield Info('debug', f'Purging item "{id}" (missing index file)')
+            yield from self._delete_item(id)
+            return
+
+        # a mapping file path => status
+        # status: True for a file to be checked; False for a file (mostly
+        # an inclusive iframe) that is not available as inline,
+        # (already added to cache or to be removed from cache)
+        files_to_update = MutatingDict()
+
+        item = FulltextCacheItem(id, meta, index, indexfile, files_to_update)
+        yield from self._collect_files_to_update(item)
+        yield from self._handle_files_to_update(item)
+
+    def _delete_item(self, id):
+        if id in self.book.fulltext:
+            yield Info('info', f'Removing stale cache for "{id}".')
+            del self.book.fulltext[id]
+
+    def _collect_files_to_update(self, item):
+        book = self.book
+        id, meta, index, indexfile, files_to_update = item
+
+        # create cache for this id if not exist yet
+        if book.fulltext.get(id) is None:
+            book.fulltext[id] = {}
+        else:
+            # unless newly created, presume no change if archive file not newer
+            # than cache file, for better performance
+            if util.is_archive(indexfile):
+                if os.stat(indexfile).st_mtime <= self.cache_last_modified:
+                    yield Info('debug', f'Skipped "{id}" (archive file older than cache)')
+                    return
+
+        # add index file(s) to update list
+        try:
+            for path in book.get_index_paths(index):
+                yield Info('debug', f'Adding "{path}" of "{id}" to check list (from index)')
+                files_to_update[path] = True
+        except zipfile.BadZipFile:
+            # MAFF file corrupted.
+            # Skip adding index files.
+            # Treat as no file exists and remove all indexes later on.
+            yield Info('error', f'Archive file for "{id}" is corrupted')
+
+        # add files in cache to update list
+        for path in book.fulltext[id]:
+            yield Info('debug', f'Adding "{path}" of "{id}" to check list (from cache)')
+            files_to_update[path] = True
+
+    def _handle_files_to_update(self, item):
+        def report_update():
+            nonlocal has_update
+            if has_update:
+                return
+            if book.fulltext[id]:
+                yield Info('info', f'Updating cache for "{id}"...')
+            else:
+                yield Info('info', f'Generating cache for "{id}"...')
+            has_update = True
+
+        book = self.book
+        id, meta, index, indexfile, files_to_update = item
+        has_update = False
+
+        for path in files_to_update:
+            yield Info('debug', f'Checking "{path}" of "{id}"')
+            # remove from cache if marked False
+            if not files_to_update[path]:
+                yield Info('debug', f'Purging "{path}" of "{id}" (inlined)')
+                if path in book.fulltext[id]:
+                    yield from report_update()
+                    del book.fulltext[id][path]
+                continue
+
+            # mark False to prevent added otherwhere
+            files_to_update[path] = False
+
+            mtime = yield from self._get_mtime(item, path)
+            if mtime is None:
+                # path not exist => delete from cache
+                yield Info('debug', f'Purging "{path}" of "{id}" (file not exist)')
+                if path in book.fulltext[id]:
+                    yield from report_update()
+                    del book.fulltext[id][path]
+                continue
+
+            # skip update if the file is not newer
+            # - A file hasn't been cached may be newly refrenced by another
+            #   updated file, and thus needs update even if it's mtime is not
+            #   newer.
+            if path in book.fulltext[id] and mtime <= self.cache_last_modified:
+                yield Info('debug', f'Skipped "{path}" of "{id}" (file older than cache)')
+                continue
+
+            yield from report_update()
+
+            # set updated fulltext
+            yield Info('debug', f'Generating cache for "{path}" of "{id}"')
+            try:
+                fulltext = yield from self._get_fulltext_cache(item, path)
+            except Exception as exc:
+                fulltext = ''
+                traceback.print_exc()
+                yield Info('error', f'Failed to generate cache for "{id}" ({path}): {exc}', exc=exc)
+
+            if fulltext is not None:
+                book.fulltext[id][path] = {
+                    'content': fulltext,
+                    }
+            else:
+                try:
+                    del book.fulltext[id][path]
+                except KeyError:
+                    pass
+
+    def _get_mtime(self, item, path):
+        if util.is_archive(item.index):
+            try:
+                zh = zipfile.ZipFile(os.path.join(self.book.data_dir, item.index))
+            except zipfile.BadZipFile as exc:
+                yield Info('error', f'Failed to open zip file "{item.index}" for "{item.id}": {exc}', exc=exc)
+                return None
+            except (FileNotFoundError, IsADirectoryError, NotADirectoryError) as exc:
+                yield Info('error', f'Failed to open zip file "{item.index}" for "{item.id}": [Errno {exc.args[0]}] {exc.args[1]}', exc=exc)
+                return None
+
+            try:
+                with zh as zh:
+                    info = zh.getinfo(path)
+                    return util.zip_timestamp(info)
+            except KeyError:
+                return None
+            except Exception as exc:
+                yield Info('error', f'Failed to access in-zip-file for "{path}" of "{item.id}": {exc}', exc=exc)
+                return None
+
+        file = os.path.join(self.book.data_dir, os.path.dirname(item.index), path)
+        try:
+            return os.stat(file).st_mtime
+        except (FileNotFoundError, IsADirectoryError, NotADirectoryError):
+            return None
+        except OSError:
+            yield Info('error', f'Failed to access file for "{path}" of "{item.id}": [Errno {exc.args[0]}] {exc.args[1]}', exc=exc)
+            return None
+
+    def _open_file(self, item, path):
+        if util.is_archive(item.index):
+            try:
+                zh = zipfile.ZipFile(os.path.join(self.book.data_dir, item.index))
+            except zipfile.BadZipFile as exc:
+                yield Info('error', f'Failed to open zip file "{item.index}" for "{item.id}": {exc}', exc=exc)
+                return None
+            except (FileNotFoundError, IsADirectoryError, NotADirectoryError) as exc:
+                yield Info('error', f'Failed to open zip file "{item.index}" for "{item.id}": [Errno {exc.args[0]}] {exc.args[1]}', exc=exc)
+                return None
+
+            try:
+                with zh as zh:
+                    return zh.open(path)
+            except KeyError:
+                return None
+            except Exception as exc:
+                yield Info('error', f'Failed to open in-zip-file for "{path}" of "{item.id}": {exc}', exc=exc)
+                return None
+
+        file = os.path.join(self.book.data_dir, os.path.dirname(item.index), path)
+        try:
+            return open(file, 'rb')
+        except (FileNotFoundError, IsADirectoryError, NotADirectoryError):
+            return None
+        except OSError as exc:
+            yield Info('error', f'Failed to open file for "{path}" of "{item.id}": [Errno {exc.args[0]}] {exc.args[1]}', exc=exc)
+            return None
+
+    def _get_fulltext_cache(self, item, path):
+        fh = yield from self._open_file(item, path)
+        if not fh:
+            yield Info('debug', f'Skipped "{path}" of "{item.id}" (file not exist or accessible)')
+            return None
+
+        fh = zip_stream(fh)
+        try:
+            mime, _ = mimetypes.guess_type(path)
+            return (yield from self._get_fulltext_cache_for_fh(item, path, fh, mime))
+        finally:
+            fh.close()
+
+    def _get_fulltext_cache_for_fh(self, item, path, fh, mime):
+        if not mime:
+            yield Info('debug', f'Skipped "{path}" of "{item.id}" (unknown type)')
+            return None
+
+        if util.mime_is_html(mime):
+            return (yield from self._get_fulltext_cache_html(item, path, fh))
+
+        if mime.startswith('text/'):
+            return (yield from self._get_fulltext_cache_txt(item, path, fh))
+
+        yield Info('debug', f'Skipped "{path}" of "{item.id}" ("{mime}" not supported)')
+        return None
+
+    def _get_fulltext_cache_html(self, item, path, fh):
+        def get_relative_file_path(url):
+            # skip when inside a data URL page (can't resolve)
+            if path is None:
+                return None
+
+            urlparts = urlsplit(url)
+
+            # skip absolute URLs
+            if urlparts.scheme != '':
+                return None
+
+            if urlparts.netloc != '':
+                return None
+
+            if urlparts.path.startswith('/'):
+                return None
+
+            base = get_relative_file_path.base = getattr(get_relative_file_path, 'base', 'file:///!/')
+            ref = get_relative_file_path.ref = getattr(get_relative_file_path, 'ref', urljoin(base, quote(path)))
+            target = urljoin(ref, urlparts.path)
+
+            # skip if URL contains '..'
+            if not target.startswith(base):
+                return None
+
+            target = unquote(target)
+
+            # ignore referring self
+            if target == ref:
+                return None
+
+            target = target[len(base):]
+
+            return target
+
+        def add_datauri_content(url):
+            try:
+                data = util.parse_datauri(url)
+            except util.DataUriMalformedError as exc:
+                yield Info('error', f'Skipped malformed data URL "{url[:self.URL_SAMPLE_LENGTH]}": {exc}', exc=exc)
+                return
+            fh = io.BytesIO(data.bytes)
+            fulltext = yield from self._get_fulltext_cache_for_fh(item, None, fh, data.mime)
+            if fulltext:
+                results.append(fulltext)
+
+        yield Info('debug', f'Retrieving HTML content for "{path}" of "{item.id}"')
+
+        # Seek for the correct charset (encoding).
+        # If a charset is not specified, lxml may select a wrong encoding for
+        # the entire document if there is text before first meta charset.
+        # Priority: BOM > meta charset > item charset > assume UTF-8
+        charset = util.sniff_bom(fh)
+        if charset:
+            # lxml does not accept "UTF-16-LE" or so, but can auto-detect
+            # encoding from BOM if encoding is None
+            # ref: https://bugs.launchpad.net/lxml/+bug/1463610
+            charset = None
+            fh.seek(0)
+        else:
+            charset = util.get_charset(fh) or item.meta.get('charset') or 'UTF-8'
+            charset = util.fix_codec(charset)
+            fh.seek(0)
+
+        results = []
+        has_instant_redirect = False
+        for time_, url, context in util.iter_meta_refresh(fh):
+            if time_ == 0 and not context:
+                has_instant_redirect = True
+
+            if not url:
+                continue
+
+            if context and any(c in util.META_REFRESH_FORBID_TAGS for c in context):
+                continue
+
+            if url.startswith('data:'):
+                yield from add_datauri_content(url)
+            else:
+                target = get_relative_file_path(url)
+                if target and target not in item.files_to_update:
+                    yield Info('debug', f'Adding "{target}" of "{item.id}" to check list (from <meta>)')
+                    item.files_to_update[target] = True
+
+        # Add data URL content of meta refresh targets to fulltext index if the
+        # page has an instant meta refresh.
+        if has_instant_redirect:
+            return self.FULLTEXT_SPACE_REPLACER(' '.join(results)).strip()
+
+        # add main content
+        # Note: adding elem.text at start event or elem.tail at end event is
+        # not reliable as the parser hasn't load full content of text or tail
+        # at that time yet.
+        # @TODO: better handle content
+        # (no space between inline nodes, line break between block nodes, etc.)
+        fh.seek(0)
+        exclusion_stack = []
+        for event, elem in etree.iterparse(fh, html=True, events=('start', 'end'),
+                remove_comments=True, encoding=charset):
+            if event == 'start':
+                # skip if we are in an excluded element
+                if exclusion_stack:
+                    continue
+
+                # Add last text before starting of this element.
+                prev = elem.getprevious()
+                attr = 'tail'
+                if prev is None:
+                    prev = elem.getparent()
+                    attr = 'text'
+
+                if prev is not None:
+                    text = getattr(prev, attr)
+                    if text:
+                        results.append(text)
+                        setattr(prev, attr, None)
+
+                if elem.tag in ('a', 'area'):
+                    # include linked pages in fulltext index
+                    try:
+                        url = elem.attrib['href']
+                    except KeyError:
+                        pass
+                    else:
+                        if url.startswith('data:'):
+                            yield from add_datauri_content(url)
+                        else:
+                            target = get_relative_file_path(url)
+                            if target and target not in item.files_to_update:
+                                yield Info('debug', f'Adding "{target}" of "{item.id}" to check list (from <{elem.tag}>)')
+                                item.files_to_update[target] = True
+
+                elif elem.tag in ('iframe', 'frame'):
+                    # include frame page in fulltext index
+                    try:
+                        url = elem.attrib['src']
+                    except KeyError:
+                        pass
+                    else:
+                        if url.startswith('data:'):
+                            yield from add_datauri_content(url)
+                        else:
+                            target = get_relative_file_path(url)
+                            if target:
+                                if self.inclusive_frames:
+                                    # Add frame content to the current page
+                                    # content if the targeted file hasn't
+                                    # been indexed.
+                                    if item.files_to_update.get(target) is not False:
+                                        yield Info('debug', f'Caching "{target}" of "{item.id}" as inline (from <{elem.tag}>)')
+                                        item.files_to_update[target] = False
+                                        fulltext = yield from self._get_fulltext_cache(item, target)
+                                        if fulltext:
+                                            results.append(fulltext)
+                                else:
+                                    if target not in item.files_to_update:
+                                        yield Info('debug', f'Adding "{target}" of "{item.id}" to check list (from <{elem.tag}>)')
+                                        item.files_to_update[target] = True
+
+                # exclude everything inside certain tags
+                if elem.tag in self.FULLTEXT_EXCLUDE_TAGS:
+                    exclusion_stack.append(elem)
+                    continue
+
+            elif event == 'end':
+                # Add last text before ending of this element.
+                if not exclusion_stack:
+                    try:
+                        prev = elem[-1]
+                        attr = 'tail'
+                    except IndexError:
+                        prev = elem
+                        attr = 'text'
+
+                    if prev is not None:
+                        text = getattr(prev, attr)
+                        if text:
+                            results.append(text)
+                            setattr(prev, attr, None)
+
+                # stop exclusion at the end of an excluding element
+                try:
+                    if elem is exclusion_stack[-1]:
+                        exclusion_stack.pop()
+                except IndexError:
+                    pass
+
+                # clean up to save memory
+                # remember to keep tail
+                try:
+                    elem.clear(keep_tail=True)
+                except TypeError:
+                    # keep_tail is supported since lxml 4.4.0
+                    pass
+                while elem.getprevious() is not None:
+                    try:
+                        del elem.getparent()[0]
+                    except TypeError:
+                        # broken html may generate extra root elem
+                        break
+
+        return self.FULLTEXT_SPACE_REPLACER(' '.join(results)).strip()
+
+    def _get_fulltext_cache_txt(self, item, path, fh):
+        yield Info('debug', f'Retrieving text content for "{path}" of "{item.id}"')
+        charset = util.sniff_bom(fh) or item.meta.get('charset') or 'UTF-8'
+        charset = util.fix_codec(charset)
+        text = fh.read().decode(charset, errors='replace')
+        return self.FULLTEXT_SPACE_REPLACER(text).strip()
+
+
+def generate(root, book_ids=None, item_ids=None, *,
+        config=None, no_lock=False, no_backup=False,
+        fulltext=True, inclusive_frames=True, recreate=False,
+        static_site=False, static_index=False,
+        locale=None, rss_root=None):
+    start = time.time()
+
+    host = Host(root, config)
+
+    # cache all book_ids if none specified
+    if not book_ids:
+        book_ids = list(host.books)
+
+    ts = None
+    avail_book_ids = set(host.books)
+    for book_id in book_ids:
+        # skip invalid book ID
+        if book_id not in avail_book_ids:
+            yield Info('warn', f'Skipped invalid book "{book_id}".')
+            continue
+
+        yield Info('info', f'Checking book "{book_id}".')
+
+        try:
+            book = host.books[book_id]
+
+            if book.no_tree:
+                yield Info('info', f'Skipped book "{book_id}" (no_tree).')
+                continue
+
+            yield Info('info', f'Caching book "{book_id}".')
+            lh = nullcontext() if no_lock else book.get_tree_lock().acquire()
+            with lh:
+                if not no_backup:
+                    # use same timestamp for all books
+                    ts = ts or util.datetime_to_id()
+                    book.init_backup(ts)
+                    yield Info('info', f'Prepared backup at "{book.get_subpath(book.backup_dir)}".')
+
+                try:
+                    if fulltext:
+                        generator = FulltextCacheGenerator(
+                            book,
+                            inclusive_frames=inclusive_frames,
+                            recreate=recreate,
+                            )
+                        yield from generator.run(item_ids)
+
+                    if static_site:
+                        generator = StaticSiteGenerator(
+                            book,
+                            static_index=static_index,
+                            locale=locale, rss=bool(rss_root),
+                            )
+                        yield from generator.run()
+
+                    if rss_root:
+                        generator = RssFeedGenerator(
+                            book,
+                            rss_root=rss_root,
+                            )
+                        yield from generator.run()
+                finally:
+                    if not no_backup:
+                        book.init_backup(False)
+
+        except Exception as exc:
+            traceback.print_exc()
+            yield Info('critical', str(exc), exc=exc)
+        else:
+            yield Info('info', 'Done.')
+
+        yield Info('info', '----------------------------------------------------------------------')
+
+    elapsed = time.time() - start
+    yield Info('info', f'Time spent: {elapsed} seconds.')

@@ -1,4 +1,3 @@
-#!/usr/bin/env python3
 """Miscellaneous utilities
 """
 import sys
@@ -12,15 +11,26 @@ import math
 import re
 import hashlib
 import time
+import mimetypes
+import binascii
+import codecs
+from base64 import b64decode
+from urllib.parse import unquote_to_bytes
+from urllib.request import pathname2url
 from ipaddress import IPv6Address, AddressValueError
-from secrets import token_urlsafe
+from datetime import datetime, timezone
 from lxml import etree
 from ._compat.contextlib import nullcontext
 
 
 #########################################################################
-# Abstract classes
+# Common classes and objects handling
 #########################################################################
+
+# common namedtuple for yielded messages for certain classes
+Info = namedtuple('Info', ['type', 'msg', 'data', 'exc'])
+Info.__new__.__defaults__ = (None, None)
+
 
 class frozendict(collections.abc.Mapping):
     """Implementation of a frozen dict, which is hashable if all values
@@ -59,21 +69,157 @@ class frozendict(collections.abc.Mapping):
         return self.__class__(self._d.copy())
 
 
-#########################################################################
-# Objects handling
-#########################################################################
-
 def make_hashable(obj):
     if isinstance(obj, collections.abc.Hashable):
         return obj
-    elif isinstance(obj, collections.abc.Set):
+
+    if isinstance(obj, collections.abc.Set):
         return frozenset(make_hashable(v) for v in obj)
-    elif isinstance(obj, collections.abc.Sequence):
+
+    if isinstance(obj, collections.abc.Sequence):
         return tuple(make_hashable(v) for v in obj)
-    elif isinstance(obj, collections.abc.Mapping):
+
+    if isinstance(obj, collections.abc.Mapping):
         return frozendict((k, make_hashable(v)) for k, v in obj.items())
+
+    raise TypeError(f"unable to make '{type(obj).__name__}' hashable")
+
+
+#########################################################################
+# ScrapBook related path/file/string/etc handling
+#########################################################################
+
+REGEX_ID_TO_DATETIME = re.compile(r'^(\d{4})(\d{2})(\d{2})(\d{2})(\d{2})(\d{2})(\d{3})$')
+REGEX_ID_TO_DATETIME_LEGACY = re.compile(r'^(\d{4})(\d{2})(\d{2})(\d{2})(\d{2})(\d{2})$')
+
+def datetime_to_id(t=None):
+    """Convert a datetime to webscrapbook ID.
+
+    Args:
+        t: datetime. Create an ID for now if None.
+    """
+    if t is None:
+        t = datetime.now(timezone.utc)
     else:
-        raise TypeError(f"unable to make '{type(obj).__name__}' hashable")
+        # convert to UTC datetime
+        t = t.astimezone(timezone.utc)
+
+    return (f'{t.year}{t.month:02}{t.day:02}{t.hour:02}{t.minute:02}'
+        f'{t.second:02}{int(t.microsecond * 0.001):03}')
+
+
+def id_to_datetime(id):
+    """Convert a webscrapbook ID to datetime.
+    """
+    m = REGEX_ID_TO_DATETIME.search(id)
+    if m:
+        return datetime(
+            int(m.group(1)),
+            int(m.group(2)),
+            int(m.group(3)),
+            int(m.group(4)),
+            int(m.group(5)),
+            int(m.group(6)),
+            int(m.group(7)) * 1000,
+            timezone.utc,
+            )
+    return None
+
+
+def datetime_to_id_legacy(t=None):
+    """Convert a datetime to legacy ScrapBook ID.
+
+    Args:
+        t: datetime. Create an ID for now if None.
+    """
+    if t is None:
+        t = datetime.now()
+    else:
+        # convert to local datetime
+        t = t.astimezone()
+
+    return f'{t.year}{t.month:02}{t.day:02}{t.hour:02}{t.minute:02}{t.second:02}'
+
+
+def id_to_datetime_legacy(id):
+    """Convert a legacy ScrapBook ID to datetime.
+    """
+    m = REGEX_ID_TO_DATETIME_LEGACY.search(id)
+    if m:
+        return datetime(
+            int(m.group(1)),
+            int(m.group(2)),
+            int(m.group(3)),
+            int(m.group(4)),
+            int(m.group(5)),
+            int(m.group(6)),
+            )
+    return None
+
+
+#########################################################################
+# String handling
+#########################################################################
+
+def crop(text, width=70, ellipsis='...'):
+    if len(text) > width:
+        return text[:max(width - len(ellipsis), 0)] + ellipsis
+    return text
+
+
+#########################################################################
+# Codecs and text encoding
+#########################################################################
+
+# all lower-case
+CODECS_MAPPING = {
+    'big5': 'cp950',
+    }
+
+def fix_codec(name):
+    """Remap codec name
+
+    Some codecs are widely used and de-facto standard for web browsers. For
+    example, most browsers display cp950 extended chars correctly even if the
+    charset of the web page is defined as 'big5'. To prevent unexpected
+    gibberish when we try to parse text in Python, we need to remap the codec
+    name of a web page from 'big5' to 'cp950' using this first.
+    """
+    try:
+        return CODECS_MAPPING[name.lower()]
+    except KeyError:
+        return name
+
+
+# starting of BOM32 is equal to BOM16, so check the former first
+BOM_DETECTORS = [
+    ('UTF-8-SIG', codecs.BOM_UTF8),
+    ('UTF-32-LE', codecs.BOM_UTF32_LE),
+    ('UTF-32-BE', codecs.BOM_UTF32_BE),
+    ('UTF-16-LE', codecs.BOM_UTF16_LE),
+    ('UTF-16-BE', codecs.BOM_UTF16_BE),
+    ]
+
+def sniff_bom(fh):
+    """Sniff a possibly existing BOM
+
+    Args:
+        fh: an opened file handler, must be seekable.
+
+    Return:
+        str: corresponding codec name for a found BOM if a BOM is found (and
+            sets pointer at the position after the BOM), or None otherwise.
+    """
+    # will read less if the file is smaller
+    raw = fh.read(4)
+
+    for enc, bom in BOM_DETECTORS:
+        if raw.startswith(bom):
+            fh.seek(len(bom))
+            return enc
+
+    fh.seek(0)
+    return None
 
 
 #########################################################################
@@ -143,6 +289,17 @@ def get_breadcrumbs(paths, base='', topname='.'):
             yield (part, base + subpath + sep, sep, is_last)
 
 
+def get_relative_url(path, start, path_is_dir=True, start_is_dir=True):
+    """Get a relative URL (quoted) from filesystem start to path
+    """
+    if not start_is_dir:
+        start = os.path.dirname(start)
+    rel_path = os.path.relpath(path, start)
+    if path_is_dir:
+        rel_path = os.path.join(rel_path, '')
+    return pathname2url(rel_path)  # this quotes URL
+
+
 #########################################################################
 # Filesystem related manipulation
 #########################################################################
@@ -183,12 +340,27 @@ def view_in_explorer(path):
 
 def checksum(file, method='sha1', chunk_size=4096):
     """Calculate the checksum of a file.
+
+    Args:
+        file: str, path-like, or file-like bytes object
     """
-    h = hashlib.new(method)
-    with open(file, 'rb') as f:
-        for chunk in iter(lambda: f.read(chunk_size), b""):
+    try:
+        fh = open(file, 'rb')
+    except TypeError:
+        fh = file
+
+    try:
+        h = hashlib.new(method)
+        while True:
+            chunk = fh.read(chunk_size)
+            if not chunk:
+                break
             h.update(chunk)
-    return h.hexdigest()
+
+        return h.hexdigest()
+    finally:
+        if fh != file:
+            fh.close()
 
 
 def file_is_link(path, st=None):
@@ -329,12 +501,69 @@ def is_compressible(mimetype):
     return False
 
 
+def mime_is_html(mime):
+    return mime in {'text/html', 'application/xhtml+xml'}
+
+
+def mime_is_archive(mime):
+    return mime in {'application/html+zip', 'application/x-maff'}
+
+
+def mime_is_htz(mime):
+    return mime == 'application/html+zip'
+
+
+def mime_is_maff(mime):
+    return mime == 'application/x-maff'
+
+
+def mime_is_markdown(mime):
+    return mime in {'text/markdown'}
+
+
+def is_html(filename):
+    mime, _ = mimetypes.guess_type(filename)
+    return mime_is_html(mime)
+
+
+def is_archive(filename):
+    mime, _ = mimetypes.guess_type(filename)
+    return mime_is_archive(mime)
+
+
+def is_htz(filename):
+    mime, _ = mimetypes.guess_type(filename)
+    return mime_is_htz(mime)
+
+
+def is_maff(filename):
+    mime, _ = mimetypes.guess_type(filename)
+    return mime_is_maff(mime)
+
+
+def is_markdown(filename):
+    mime, _ = mimetypes.guess_type(filename)
+    return mime_is_markdown(mime)
+
+
 #########################################################################
 # ZIP handling
 #########################################################################
 
 class ZipDirNotFoundError(Exception):
     pass
+
+
+def zip_tuple_timestamp(zipinfodate):
+    """Get timestamp from a ZipInfo.date_time.
+    """
+    return time.mktime(zipinfodate + (0, 0, -1))
+
+
+def zip_timestamp(zipinfo):
+    """Get timestamp from a ZipInfo.
+    """
+    return zip_tuple_timestamp(zipinfo.date_time)
 
 
 def zip_file_info(zip, subpath, base=None, check_implicit_dir=False):
@@ -356,18 +585,14 @@ def zip_file_info(zip, subpath, base=None, check_implicit_dir=False):
         except KeyError:
             pass
         else:
-            lm = info.date_time
-            epoch = int(time.mktime((lm[0], lm[1], lm[2], lm[3], lm[4], lm[5], 0, 0, -1)))
-            return FileInfo(name=name, type='file', size=info.file_size, last_modified=epoch)
+            return FileInfo(name=name, type='file', size=info.file_size, last_modified=zip_timestamp(info))
 
         try:
             info = zh.getinfo(subpath + '/')
         except KeyError:
             pass
         else:
-            lm = info.date_time
-            epoch = int(time.mktime((lm[0], lm[1], lm[2], lm[3], lm[4], lm[5], 0, 0, -1)))
-            return FileInfo(name=name, type='dir', size=None, last_modified=epoch)
+            return FileInfo(name=name, type='dir', size=None, last_modified=zip_timestamp(info))
 
         if check_implicit_dir:
             base = subpath + '/'
@@ -458,14 +683,111 @@ def zip_hasdir(zip, subpath):
 
 
 #########################################################################
+# HTTP manipulation
+#########################################################################
+
+ContentType = namedtuple('ContentType', ['type', 'parameters'])
+
+PARSE_CONTENT_TYPE_REGEX_MIME = re.compile(r'^(.*?)(?=;|$)', re.I)
+PARSE_CONTENT_TYPE_REGEX_FIELD = re.compile(r';((?:"(?:\\.|[^"])*(?:"|$)|[^"])*?)(?=;|$)', re.I)
+PARSE_CONTENT_TYPE_REGEX_KEY_VALUE = re.compile(r'\s*(.*?)\s*=\s*("(?:\\.|[^"])*"|[^"]*?)\s*$', re.I)
+PARSE_CONTENT_TYPE_REGEX_DQUOTE_VALUE = re.compile(r'^"(.*?)"$')
+
+def parse_content_type(string):
+    """Parse content type header.
+
+    Return:
+        ContentType: type and parameter keys are all lower case.
+    """
+    type = None
+    parameters = {}
+
+    if not string:
+        return ContentType(type, parameters)
+
+    match_mime = PARSE_CONTENT_TYPE_REGEX_MIME.search(string)
+    if match_mime:
+        string = string[match_mime.end():]
+        type = match_mime.group(1).strip().lower()
+
+        while True:
+            match_field = PARSE_CONTENT_TYPE_REGEX_FIELD.search(string)
+            if not match_field:
+                break
+
+            string = string[match_field.end():]
+            parameter = match_field.group(1)
+            match_key_value = PARSE_CONTENT_TYPE_REGEX_KEY_VALUE.search(parameter)
+
+            if match_key_value:
+                field = match_key_value.group(1).lower()
+                value = match_key_value.group(2)
+
+                # handle double quoted value
+                match_dquote = PARSE_CONTENT_TYPE_REGEX_DQUOTE_VALUE.search(value)
+                if match_dquote:
+                    value = match_dquote.group(1)
+
+                parameters[field] = value
+
+    return ContentType(type, parameters)
+
+
+DataUri = namedtuple('DataUri', ['bytes', 'mime', 'parameters'])
+
+PARSE_DATAURI_REGEX_FIELDS = re.compile(r'^data:([^,]*?)(;base64)?,([^#]*)', re.I)
+PARSE_DATAURI_REGEX_KEY_VALUE = re.compile(r'^(.*?)=(.*?)$')
+
+class DataUriMalformedError(Exception):
+    pass
+
+def parse_datauri(datauri):
+    """Parse a Data URI
+
+    Args:
+        datauri: the data URI string
+
+    Returns:
+        DataUri: a tuple containing information
+
+    Raises:
+        DataUriMalformedError
+    """
+    match_fields = PARSE_DATAURI_REGEX_FIELDS.search(datauri)
+    if not match_fields:
+        raise DataUriMalformedError('Malformed fields')
+
+    mediatype = match_fields.group(1)
+    base64 = bool(match_fields.group(2))
+    data = match_fields.group(3)
+
+    parts = mediatype.split(';')
+    mime = parts.pop(0)
+    parameters = {}
+    for part in parts:
+        match_key_value = PARSE_DATAURI_REGEX_KEY_VALUE.search(part)
+        if match_key_value:
+            parameters[match_key_value.group(1).lower()] = match_key_value.group(2)
+
+    if base64:
+        try:
+            bytes_ = b64decode(data)
+        except binascii.Error as exc:
+            raise DataUriMalformedError(f'Malformed base64 sequence: {exc}') from exc
+    else:
+        # decode precent-encoding to corresponding byte
+        # non-ASCII chars are encoded as UTF-8 bytes
+        bytes_ = unquote_to_bytes(data)
+
+    return DataUri(bytes_, mime, parameters)
+
+
+#########################################################################
 # HTML manipulation
 #########################################################################
 
-MetaRefreshInfo = namedtuple('MetaRefreshInfo', ['time', 'target'])
-
-
-def parse_meta_refresh(file):
-    """Retrieve meta refresh target from a file.
+def get_charset(file):
+    """Search for a defined charset.
 
     Args:
         file: str, path-like, or file-like object
@@ -479,8 +801,93 @@ def parse_meta_refresh(file):
 
     if fh:
         try:
-            for event, elem in etree.iterparse(fh, html=True, events=('end',), tag='meta'):
-                if elem.attrib.get('http-equiv', '').lower() == 'refresh':
+            for event, elem in etree.iterparse(fh, html=True, events=('start',), tag=('meta', 'body')):
+                if elem.tag == 'meta':
+                    charset = elem.attrib.get('charset')
+                    if charset:
+                        return charset.strip()
+
+                    if elem.attrib.get('http-equiv', '').lower() == 'content-type':
+                        _, params = parse_content_type(elem.attrib.get('content', ''))
+                        charset = params.get('charset')
+                        if charset:
+                            return charset
+
+                elif elem.tag == 'body':
+                    # presume that no <meta> will appear after <body> start
+                    # for a normal HTML to exit early
+                    return None
+
+                # clean up to save memory
+                elem.clear()
+                while elem.getprevious() is not None:
+                    try:
+                        del elem.getparent()[0]
+                    except TypeError:
+                        # broken html may generate extra root elem
+                        break
+        finally:
+            if fh != file:
+                fh.close()
+
+    return None
+
+
+MetaRefreshInfo = namedtuple('MetaRefreshInfo', ['time', 'target', 'context'])
+
+META_REFRESH_REGEX_URL = re.compile(r'^\s*url\s*=\s*(.*?)\s*$', re.I)
+
+# meta refresh in these tags does not always work
+META_REFRESH_CONTEXT_TAGS = {
+    'title',
+    # 'style', 'script',  # not visible by lxml
+    # 'frame',  # self-closing tag
+    'iframe',
+    # 'object', 'applet',  # refresh works in the browser
+    # 'audio', 'video',  # refresh works in the browser
+    # 'canvas',  # refresh works in the browser
+    'noframes', 'noscript', 'noembed',
+    'textarea',
+    'template',
+    # 'svg', 'math',  # refresh works in the browser
+    'xmp',
+    # 'parsererror',  # doesn't appear in lxml for xhtml
+    }
+
+# meta refresh in these tags should never work
+META_REFRESH_FORBID_TAGS = {
+    'title',
+    'textarea',
+    'template',
+    'xmp',
+    }
+
+def iter_meta_refresh(file):
+    """Iterate through meta refreshes from a file.
+
+    Args:
+        file: str, path-like, or file-like object
+    """
+    try:
+        fh = open(file, 'rb')
+    except TypeError:
+        fh = file
+    except FileNotFoundError:
+        fh = None
+
+    if not fh:
+        return
+
+    try:
+        contexts = []
+        for event, elem in etree.iterparse(fh, html=True, events=('start', 'end')):
+            if event == 'start':
+                if elem.tag in META_REFRESH_CONTEXT_TAGS:
+                    contexts.append(elem.tag)
+                    continue
+
+                if (elem.tag == 'meta' and
+                        elem.attrib.get('http-equiv', '').lower() == 'refresh'):
                     time, _, content = elem.attrib.get('content', '').partition(';')
 
                     try:
@@ -488,21 +895,39 @@ def parse_meta_refresh(file):
                     except ValueError:
                         time = 0
 
-                    m = re.match(r'^\s*url\s*=\s*(.*?)\s*$', content, flags=re.I)
-                    target = m.group(1) if m else None
+                    match_url = META_REFRESH_REGEX_URL.search(content)
+                    target = match_url.group(1) if match_url else None
+                    context = contexts.copy() if contexts else None
+                    yield MetaRefreshInfo(time=time, target=target, context=context)
 
-                    if time == 0 and target is not None:
-                        return MetaRefreshInfo(time=time, target=target)
+            elif event == 'end':
+                if contexts and elem.tag == contexts[-1]:
+                    contexts.pop()
+                    continue
 
                 # clean up to save memory
                 elem.clear()
                 while elem.getprevious() is not None:
-                    del elem.getparent()[0]
-        finally:
-            if fh != file:
-                fh.close()
+                    try:
+                        del elem.getparent()[0]
+                    except TypeError:
+                        # broken html may generate extra root elem
+                        break
+    finally:
+        if fh != file:
+            fh.close()
 
-    return MetaRefreshInfo(time=None, target=None)
+
+def parse_meta_refresh(file):
+    """Retrieve meta refresh target from a file.
+
+    Args:
+        file: str, path-like, or file-like object
+    """
+    for info in iter_meta_refresh(file):
+        if info.time == 0 and info.target is not None and not info.context:
+            return info
+    return MetaRefreshInfo(time=None, target=None, context=None)
 
 
 #########################################################################
@@ -636,84 +1061,3 @@ class Encrypt():
         return fn(text, salt)
 
 encrypt = Encrypt().encrypt
-
-
-class TokenHandler():
-    """Handle security token validation to avoid XSRF attack.
-    """
-    def __init__(self, cache_dir):
-        self.cache_dir = cache_dir
-        self.last_purge = 0
-
-    def acquire(self, now=None):
-        if now is None:
-            now = int(time.time())
-
-        self.check_delete_expire(now)
-
-        token = token_urlsafe()
-        token_file = os.path.join(self.cache_dir, token)
-        while os.path.lexists(token_file):
-            token = token_urlsafe()
-            token_file = os.path.join(self.cache_dir, token)
-
-        os.makedirs(os.path.dirname(token_file), exist_ok=True)
-        with open(token_file, 'w', encoding='UTF-8') as f:
-            f.write(str(now + self.DEFAULT_EXPIRY))
-
-        return token
-
-    def validate(self, token, now=None):
-        if now is None:
-            now = int(time.time())
-
-        token_file = os.path.join(self.cache_dir, token)
-
-        try:
-            with open(token_file, 'r', encoding='UTF-8') as f:
-                expire = int(f.read())
-        except (FileNotFoundError, IsADirectoryError):
-            return False
-
-        if now >= expire:
-            os.remove(token_file)
-            return False
-
-        return True
-
-    def delete(self, token):
-        token_file = os.path.join(self.cache_dir, token)
-
-        try:
-            os.remove(token_file)
-        except OSError:
-            pass
-
-    def delete_expire(self, now=None):
-        if now is None:
-            now = int(time.time())
-
-        try:
-            token_files = os.scandir(self.cache_dir)
-        except FileNotFoundError:
-            pass
-        else:
-            for token_file in token_files:
-                try:
-                    with open(token_file, 'r', encoding='UTF-8') as f:
-                        expire = int(f.read())
-                except (OSError, ValueError):
-                    continue
-                if now >= expire:
-                    os.remove(token_file)
-
-    def check_delete_expire(self, now=None):
-        if now is None:
-            now = int(time.time())
-
-        if now >= self.last_purge + self.PURGE_INTERVAL:
-            self.last_purge = now
-            self.delete_expire(now)
-
-    PURGE_INTERVAL = 3600  # in seconds
-    DEFAULT_EXPIRY = 1800  # in seconds

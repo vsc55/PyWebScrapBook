@@ -1,4 +1,3 @@
-#!/usr/bin/env python3
 """A backend toolkit for management of WebScrapBook collection.
 """
 import sys
@@ -9,19 +8,20 @@ from copy import deepcopy
 import mimetypes
 import re
 
-__all__ = ['WSB_EXTENSION_MIN_VERSION', 'WSB_USER_CONFIG', 'WSB_DIR', 'WSB_LOCAL_CONFIG', 'config']
+__all__ = ['WSB_EXTENSION_MIN_VERSION', 'WSB_USER_DIR', 'WSB_USER_CONFIG', 'WSB_DIR', 'WSB_CONFIG', 'config']
 
 __package_name__ = 'webscrapbook'
-__version__ = '0.21.0'
+__version__ = '0.23.0'
 __author__ = 'Danny Lin'
 __author_email__ = 'danny0838@gmail.com'
 __homepage__ = 'https://github.com/danny0838/PyWebScrapBook'
 __license__ = 'MIT'
 
-WSB_EXTENSION_MIN_VERSION = '0.76.0'
-WSB_USER_CONFIG = os.environ.get('WSB_USER_CONFIG') or os.path.join(os.path.expanduser('~'), '.wsbconfig')
+WSB_EXTENSION_MIN_VERSION = '0.79.0'
+WSB_USER_DIR = os.path.join(os.path.expanduser('~'), '.config', 'wsb')  # affected by $HOME
+WSB_USER_CONFIG = os.path.join(os.path.expanduser('~'), '.wsbconfig')  # affected by $HOME
 WSB_DIR = os.environ.get('WSB_DIR') or '.wsb'
-WSB_LOCAL_CONFIG = os.environ.get('WSB_LOCAL_CONFIG') or 'config.ini'
+WSB_CONFIG = 'config.ini'
 
 mimetypes.add_type("application/rss+xml", ".rss")
 mimetypes.add_type("application/atom+xml", ".atom")
@@ -44,6 +44,69 @@ class Config():
     Values are loaded from config files relative to CWD. Consider calling
     load() if the script changes CWD during the runtime.
     """
+    DEFAULT = {
+        'app': {
+            'name': 'WebScrapBook',
+            'theme': 'default',
+            'root': '.',
+            'base': '',
+            'content_security_policy': 'strict',
+            'allowed_x_for': '0',
+            'allowed_x_proto': '0',
+            'allowed_x_host': '0',
+            'allowed_x_port': '0',
+            'allowed_x_prefix': '0',
+            },
+        'server': {
+            'port': '8080',
+            'host': 'localhost',
+            'ssl_on': 'false',
+            'ssl_key': '',
+            'ssl_cert': '',
+            'ssl_pw': '',
+            'browse': 'true',
+            },
+        'browser': {
+            'command': '',
+            'index': '',
+            'cache_prefix': 'webscrapbook.',
+            'cache_expire': '259200',
+            'use_jar': 'false',
+            },
+        'book ""': {
+            'name': 'scrapbook',
+            'top_dir': '',
+            'data_dir': '',
+            'tree_dir': '.wsb/tree',
+            'index': '.wsb/tree/map.html',
+            'no_tree': 'false',
+            },
+        }
+    TYPES = {
+        'app': {
+            'allowed_x_for': 'getint',
+            'allowed_x_proto': 'getint',
+            'allowed_x_host': 'getint',
+            'allowed_x_port': 'getint',
+            'allowed_x_prefix': 'getint',
+            },
+        'server': {
+            'port': 'getint',
+            'ssl_on': 'getboolean',
+            'browse': 'getboolean',
+            },
+        'browser': {
+            'cache_expire': 'getint',
+            'use_jar': 'getboolean',
+            },
+        'book': {
+            None: {
+                'no_tree': 'getboolean',
+                },
+            },
+        }
+    SUBSECTED = ['book', 'auth']
+
     def __init__(self):
         self._conf = None
         self._data = None
@@ -115,10 +178,9 @@ class Config():
                         sec, subsec = m.group(1), m.group(2) or ''
                         if sec in self.SUBSECTED:
                             newsection = f'{sec} "{subsec}"'
-                            if newsection != section:
-                                conf.setdefault(newsection, OrderedDict())
-                                conf[newsection].update(parser[section])
-                                continue
+                            conf.setdefault(newsection, self.DEFAULT.get(f'{sec} ""', OrderedDict()))
+                            conf[newsection].update(parser[section])
+                            continue
 
                     # conf.setdefault(...).update(...) doesn't work here as the
                     # setdefault may return the default value rather then a
@@ -128,44 +190,14 @@ class Config():
 
         # default config
         self._conf = conf = ConfigParser(interpolation=None)
-        conf['app'] = {}
-        conf['app']['name'] = 'WebScrapBook'
-        conf['app']['theme'] = 'default'
-        conf['app']['root'] = '.'
-        conf['app']['base'] = ''
-        conf['app']['content_security_policy'] = 'strict'
-        conf['app']['allowed_x_for'] = '0'
-        conf['app']['allowed_x_proto'] = '0'
-        conf['app']['allowed_x_host'] = '0'
-        conf['app']['allowed_x_port'] = '0'
-        conf['app']['allowed_x_prefix'] = '0'
-        conf['server'] = {}
-        conf['server']['port'] = '8080'
-        conf['server']['host'] = 'localhost'
-        conf['server']['ssl_on'] = 'false'
-        conf['server']['ssl_key'] = ''
-        conf['server']['ssl_cert'] = ''
-        conf['server']['ssl_pw'] = ''
-        conf['server']['browse'] = 'true'
-        conf['browser'] = {}
-        conf['browser']['command'] = ''
-        conf['browser']['index'] = ''
-        conf['browser']['cache_prefix'] = 'webscrapbook.'
-        conf['browser']['cache_expire'] = '259200'
-        conf['browser']['use_jar'] = 'false'
-        conf['book ""'] = {}
-        conf['book ""']['name'] = 'scrapbook'
-        conf['book ""']['top_dir'] = ''
-        conf['book ""']['data_dir'] = ''
-        conf['book ""']['tree_dir'] = '.wsb/tree'
-        conf['book ""']['index'] = '.wsb/tree/map.html'
-        conf['book ""']['no_tree'] = 'false'
+        conf.read_dict(self.DEFAULT)
 
         # user config
+        load_config(os.path.join(WSB_USER_DIR, WSB_CONFIG))
         load_config(WSB_USER_CONFIG)
 
         # book config
-        load_config(os.path.join(root, WSB_DIR, WSB_LOCAL_CONFIG))
+        load_config(os.path.join(root, WSB_DIR, WSB_CONFIG))
 
         # map subsections
         self._data = OrderedDict()
@@ -188,30 +220,5 @@ class Config():
                     sectionobj[key] = getattr(conf[section], self.TYPES[section][key])(key)
                 except KeyError:
                     sectionobj[key] = conf[section][key]
-
-    SUBSECTED = ['book', 'auth']
-    TYPES = {
-        'app': {
-            'allowed_x_for': 'getint',
-            'allowed_x_proto': 'getint',
-            'allowed_x_host': 'getint',
-            'allowed_x_port': 'getint',
-            'allowed_x_prefix': 'getint',
-            },
-        'server': {
-            'port': 'getint',
-            'ssl_on': 'getboolean',
-            'browse': 'getboolean',
-            },
-        'browser': {
-            'cache_expire': 'getint',
-            'use_jar': 'getboolean',
-            },
-        'book': {
-            None: {
-                'no_tree': 'getboolean',
-                },
-            },
-        }
 
 config = Config()

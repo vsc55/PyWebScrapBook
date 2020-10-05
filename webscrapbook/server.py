@@ -1,4 +1,3 @@
-#!/usr/bin/env python3
 """Server backend of WebScrapBook toolkit.
 """
 import os
@@ -13,7 +12,7 @@ from . import Config
 from .app import make_app
 from .util import is_nullhost
 
-def serve(root, **kwargs):
+def serve(root):
     config = Config()
     config.load(root)
 

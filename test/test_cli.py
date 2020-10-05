@@ -8,7 +8,7 @@ import zipfile
 import re
 from urllib.request import pathname2url
 from tempfile import gettempdir
-from webscrapbook import WSB_DIR, WSB_LOCAL_CONFIG
+from webscrapbook import WSB_DIR, WSB_CONFIG
 from webscrapbook import Config
 from webscrapbook import cli
 
@@ -324,6 +324,42 @@ class TestConfig(unittest.TestCase):
             })
 
         mock_dump.assert_called_once_with(sys.stdout)
+
+class TestCache(unittest.TestCase):
+    def tearDown(self):
+        try:
+            shutil.rmtree(os.path.join(test_dir, 'temp'))
+        except NotADirectoryError:
+            os.remove(os.path.join(test_dir, 'temp'))
+        except FileNotFoundError:
+            pass
+
+    @mock.patch('webscrapbook.cli.wsb_cache.generate')
+    def test_call(self, mock_func):
+        cli.cmd_cache({
+            'book_ids': ['book1', 'book2'],
+            'item_ids': ['item1', 'item2'],
+            'fulltext': False,
+            'inclusive_frames': False,
+            'static_site': True,
+            'static_index': True,
+            'rss_root': 'http://example.com:8000/wsb/',
+            'locale': 'zh_TW',
+            'no_backup': True,
+            'debug': True,
+            })
+
+        mock_func.assert_called_once_with(
+            book_ids=['book1', 'book2'],
+            item_ids=['item1', 'item2'],
+            fulltext=False,
+            inclusive_frames=False,
+            static_site=True,
+            static_index=True,
+            rss_root='http://example.com:8000/wsb/',
+            locale='zh_TW',
+            no_backup=True,
+            )
 
 class TestEncrypt(unittest.TestCase):
     @mock.patch('sys.stdout', new_callable=io.StringIO)
